@@ -55,6 +55,7 @@ def inject_css() -> None:
             .app-card h3, .app-card p { margin: 0; }
             .ai-box {
                 background: #f8fafc;
+                color : #333333;
                 border: 1px solid #e2e8f0;
                 padding: 16px;
                 border-radius: 16px;
@@ -63,6 +64,7 @@ def inject_css() -> None:
                 border-left: 6px solid #f59e0b;
                 background: #fff7ed;
                 padding: 14px 16px;
+                color : #333333;
                 border-radius: 12px;
                 margin: 10px 0 16px 0;
             }
