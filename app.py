@@ -292,25 +292,39 @@ def fetch_from_nselib(symbol: str) -> pd.DataFrame:
     return df
 
 
+DISPLAY_MIN_ROWS = 20
+PREDICTION_MIN_ROWS = 50
+BACKTEST_MIN_ROWS = 120
+
+
 @st.cache_data(show_spinner=False, ttl=900)
 def fetch_stock_data(symbol: str) -> tuple[pd.DataFrame, str, str]:
     last_error = None
 
-    for _ in range(2):
+    symbols_to_try = [symbol]
+    if symbol.endswith(".NS"):
+        symbols_to_try.append(symbol.replace(".NS", ".BO"))
+    elif symbol.endswith(".BO"):
+        symbols_to_try.append(symbol.replace(".BO", ".NS"))
+
+    for sym in symbols_to_try:
+        for _ in range(2):
+            try:
+                yf_df = fetch_from_yfinance(sym)
+                if len(yf_df) >= DISPLAY_MIN_ROWS:
+                    note = f"Primary source loaded successfully for {sym}."
+                    return yf_df, "yfinance", note
+            except Exception as ex:
+                last_error = ex
+            time.sleep(1)
+
         try:
-            yf_df = fetch_from_yfinance(symbol)
-            if len(yf_df) >= 50:
-                return yf_df, "yfinance", "Primary source loaded successfully."
+            nse_df = fetch_from_nselib(sym)
+            if len(nse_df) >= DISPLAY_MIN_ROWS:
+                note = f"Fallback source used for {sym} because yfinance was unavailable or incomplete."
+                return nse_df, "nselib", note
         except Exception as ex:
             last_error = ex
-        time.sleep(1)
-
-    try:
-        nse_df = fetch_from_nselib(symbol)
-        if len(nse_df) >= 50:
-            return nse_df, "nselib", "Fallback source used because yfinance was unavailable or incomplete."
-    except Exception as ex:
-        last_error = ex
 
     if last_error:
         raise last_error
@@ -366,7 +380,7 @@ def build_forecast(data: pd.DataFrame, days: int) -> tuple[pd.DataFrame, pd.Data
     df["y"] = pd.to_numeric(df["y"], errors="coerce")
     df = df.dropna(subset=["ds", "y"]).copy()
 
-    if len(df) < 50:
+    if len(df) < PREDICTION_MIN_ROWS:
         raise ValueError("Not enough clean data for prediction.")
 
     model = Prophet(
@@ -390,7 +404,7 @@ def simple_backtest(data: pd.DataFrame, holdout_days: int = 30) -> dict:
     df["y"] = pd.to_numeric(df["y"], errors="coerce")
     df = df.dropna().copy()
 
-    if len(df) < 120:
+    if len(df) < BACKTEST_MIN_ROWS:
         return {"ok": False, "reason": "Not enough data for backtest."}
 
     holdout_days = min(holdout_days, max(7, len(df) // 5))
@@ -697,7 +711,7 @@ def build_comparison_snapshot(symbols: tuple, days: int) -> tuple[pd.DataFrame, 
     for sym in symbols:
         try:
             d, _, _ = fetch_stock_data(sym)
-            if d.empty or len(d) < 50:
+            if d.empty or len(d) < DISPLAY_MIN_ROWS:
                 continue
             d = add_indicators(d)
             close = float(d["Close"].iloc[-1])
@@ -873,7 +887,7 @@ if run_btn:
         st.session_state.last_fetch_note = source_note
         progress.progress(45)
 
-        if raw_data.empty or len(raw_data) < 50:
+        if raw_data.empty or len(raw_data) < DISPLAY_MIN_ROWS:
             progress.empty()
             loading_msg.empty()
             st.error(f"Could not fetch enough usable data for {symbol}.")
@@ -904,8 +918,11 @@ if run_btn:
         forecast = None
         future_rows = None
         try:
-            hist_df, forecast = build_forecast(data, days)
-            future_rows = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(days).copy()
+            if len(data) >= PREDICTION_MIN_ROWS:
+                hist_df, forecast = build_forecast(data, days)
+                future_rows = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(days).copy()
+            else:
+                forecast_error = "Not enough historical data for prediction. Showing live analysis only."
         except Exception as ex:
             forecast_error = str(ex)
 
