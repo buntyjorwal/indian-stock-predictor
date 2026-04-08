@@ -7,10 +7,17 @@ import yfinance as yf
 from prophet import Prophet
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Indian Stock Market Predictor Pro", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Indian Stock Market Predictor Pro+", page_icon="📈", layout="wide")
 
-st.title("📊 Indian Stock Market Predictor Pro")
-st.markdown("**Real-time NSE/BSE data + Forecast + Technical Analysis + Signal Engine + Backtest**")
+st.title("📊 Indian Stock Market Predictor Pro+")
+st.markdown("**Real-time NSE/BSE data + Forecast + Technical Analysis + Signal Engine + Backtest + Fundamentals + Watchlist + Support/Resistance**")
+
+
+# -----------------------------
+# Session State
+# -----------------------------
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = ["RELIANCE.NS", "HDFCBANK.NS", "TCS.NS", "INFY.NS"]
 
 
 # -----------------------------
@@ -286,7 +293,15 @@ def generate_signal(df: pd.DataFrame) -> dict:
         label = "HOLD"
         color = "orange"
 
-    return {"label": label, "score": score, "reasons": reasons, "color": color}
+    confidence = min(95, max(35, 50 + (abs(score) * 8)))
+
+    return {
+        "label": label,
+        "score": score,
+        "reasons": reasons,
+        "color": color,
+        "confidence": confidence
+    }
 
 
 def risk_level(df: pd.DataFrame) -> tuple[str, float]:
@@ -304,11 +319,133 @@ def risk_level(df: pd.DataFrame) -> tuple[str, float]:
         return "High", vol_annual
 
 
+def get_support_resistance(df: pd.DataFrame) -> dict:
+    recent = df.tail(60).copy()
+    if recent.empty:
+        return {"support": None, "resistance": None, "stop_loss": None, "breakout": None}
+
+    current = float(recent["Close"].iloc[-1])
+
+    supports = sorted(recent["Low"].dropna().unique().tolist())
+    resistances = sorted(recent["High"].dropna().unique().tolist())
+
+    support = None
+    resistance = None
+
+    lower_supports = [x for x in supports if x < current]
+    higher_resistances = [x for x in resistances if x > current]
+
+    if lower_supports:
+        support = max(lower_supports)
+    if higher_resistances:
+        resistance = min(higher_resistances)
+
+    stop_loss = None
+    breakout = None
+
+    if support is not None:
+        stop_loss = round(support * 0.985, 2)
+    if resistance is not None:
+        breakout = round(resistance * 1.01, 2)
+
+    return {
+        "support": round(support, 2) if support is not None else None,
+        "resistance": round(resistance, 2) if resistance is not None else None,
+        "stop_loss": stop_loss,
+        "breakout": breakout
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def fetch_fundamentals(symbol: str) -> dict:
+    try:
+        tk = yf.Ticker(symbol)
+        info = tk.info if hasattr(tk, "info") else {}
+
+        return {
+            "longName": info.get("longName", ""),
+            "sector": info.get("sector", ""),
+            "industry": info.get("industry", ""),
+            "marketCap": info.get("marketCap", None),
+            "trailingPE": info.get("trailingPE", None),
+            "forwardPE": info.get("forwardPE", None),
+            "dividendYield": info.get("dividendYield", None),
+            "bookValue": info.get("bookValue", None),
+            "priceToBook": info.get("priceToBook", None),
+            "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh", None),
+            "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow", None),
+            "currency": info.get("currency", "INR"),
+            "website": info.get("website", ""),
+        }
+    except Exception:
+        return {}
+
+
+def format_large_number(x):
+    if x is None or pd.isna(x):
+        return "-"
+    x = float(x)
+    if x >= 1_00_00_00_000:
+        return f"₹ {x / 1_00_00_00_000:.2f} Cr"
+    if x >= 1_00_00_000:
+        return f"₹ {x / 1_00_00_000:.2f} Cr"
+    if x >= 1_00_000:
+        return f"₹ {x / 1_00_000:.2f} Lakh"
+    return f"₹ {x:,.2f}"
+
+
 def fmt_num(x) -> str:
     try:
         return f"{float(x):,.2f}"
     except Exception:
         return "-"
+
+
+def add_to_watchlist(symbol: str):
+    symbol = normalize_symbol(symbol)
+    if symbol not in st.session_state.watchlist:
+        st.session_state.watchlist.append(symbol)
+
+
+def remove_from_watchlist(symbol: str):
+    if symbol in st.session_state.watchlist:
+        st.session_state.watchlist.remove(symbol)
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def build_watchlist_snapshot(symbols: tuple) -> pd.DataFrame:
+    rows = []
+
+    for sym in symbols:
+        try:
+            d = fetch_stock_data(sym)
+            if d.empty or len(d) < 3:
+                continue
+
+            d = add_indicators(d)
+            close = float(d["Close"].iloc[-1])
+            prev = float(d["Close"].iloc[-2])
+            chg = close - prev
+            chg_pct = (chg / prev * 100) if prev else 0.0
+
+            sig = generate_signal(d)
+            risk_name, vol = risk_level(d)
+
+            rows.append({
+                "Symbol": sym,
+                "Price": round(close, 2),
+                "Day Change": round(chg, 2),
+                "Day Change %": round(chg_pct, 2),
+                "Signal": sig["label"],
+                "Confidence %": sig["confidence"],
+                "Risk": risk_name,
+                "RSI14": round(float(d["RSI14"].iloc[-1]), 2) if pd.notna(d["RSI14"].iloc[-1]) else None,
+                "SMA20": round(float(d["SMA20"].iloc[-1]), 2) if pd.notna(d["SMA20"].iloc[-1]) else None,
+            })
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
 
 
 # -----------------------------
@@ -342,6 +479,24 @@ symbol = normalize_symbol(symbol_input)
 days = st.sidebar.slider("Days to Predict", min_value=7, max_value=60, value=15)
 show_backtest = st.sidebar.checkbox("Show Backtest", value=True)
 show_technical = st.sidebar.checkbox("Show Technical Indicators", value=True)
+show_fundamentals = st.sidebar.checkbox("Show Fundamentals", value=True)
+
+col_w1, col_w2 = st.sidebar.columns(2)
+with col_w1:
+    if st.button("Add to Watchlist"):
+        add_to_watchlist(symbol)
+        st.sidebar.success(f"Added {symbol}")
+with col_w2:
+    if st.button("Remove"):
+        remove_from_watchlist(symbol)
+        st.sidebar.warning(f"Removed {symbol}")
+
+st.sidebar.markdown("### Watchlist")
+if st.session_state.watchlist:
+    for wl in st.session_state.watchlist:
+        st.sidebar.write(f"• {wl}")
+else:
+    st.sidebar.write("No watchlist items")
 
 run_btn = st.sidebar.button("Fetch Data & Predict", type="primary")
 
@@ -376,6 +531,8 @@ if run_btn:
 
         signal = generate_signal(data)
         risk_name, volatility = risk_level(data)
+        levels = get_support_resistance(data)
+        fundamentals = fetch_fundamentals(symbol) if show_fundamentals else {}
 
         st.success(f"✅ Data loaded for **{symbol}**")
 
@@ -392,6 +549,7 @@ if run_btn:
             <div style="padding:12px 16px;border-radius:12px;background:#111827;margin:10px 0 18px 0;">
                 <span style="font-size:18px;font-weight:700;">Signal:</span>
                 <span style="font-size:20px;font-weight:800;color:{signal['color']};margin-left:8px;">{signal['label']}</span>
+                <span style="margin-left:16px;font-size:16px;">Confidence: <b>{signal['confidence']}%</b></span>
                 <span style="margin-left:16px;font-size:16px;">Risk: <b>{risk_name}</b></span>
                 <span style="margin-left:16px;font-size:16px;">Score: <b>{signal['score']}</b></span>
             </div>
@@ -399,8 +557,8 @@ if run_btn:
             unsafe_allow_html=True
         )
 
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(
-            ["Overview", "Technical Analysis", "Forecast", "Backtest", "Data Table"]
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+            ["Overview", "Technical Analysis", "Forecast", "Backtest", "Fundamentals", "Watchlist"]
         )
 
         with tab1:
@@ -420,6 +578,11 @@ if run_btn:
             fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], mode="lines", name="SMA20"))
             fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode="lines", name="SMA50"))
             fig.add_trace(go.Scatter(x=data.index, y=data["SMA200"], mode="lines", name="SMA200"))
+
+            if levels["support"] is not None:
+                fig.add_hline(y=levels["support"], annotation_text=f"Support {levels['support']}", line_dash="dot")
+            if levels["resistance"] is not None:
+                fig.add_hline(y=levels["resistance"], annotation_text=f"Resistance {levels['resistance']}", line_dash="dot")
 
             fig.update_layout(
                 title=f"{symbol} Historical Price with Moving Averages",
@@ -442,6 +605,13 @@ if run_btn:
                 st.write("**Why:**")
                 for reason in signal["reasons"]:
                     st.write(f"- {reason}")
+
+            st.subheader("🎯 Support / Resistance")
+            sr1, sr2, sr3, sr4 = st.columns(4)
+            sr1.metric("Nearest Support", f"₹ {fmt_num(levels['support'])}" if levels["support"] is not None else "-")
+            sr2.metric("Nearest Resistance", f"₹ {fmt_num(levels['resistance'])}" if levels["resistance"] is not None else "-")
+            sr3.metric("Suggested Stop Loss", f"₹ {fmt_num(levels['stop_loss'])}" if levels["stop_loss"] is not None else "-")
+            sr4.metric("Breakout Zone", f"₹ {fmt_num(levels['breakout'])}" if levels["breakout"] is not None else "-")
 
         with tab2:
             if show_technical:
@@ -531,6 +701,11 @@ if run_btn:
                 )
                 fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat"], mode="lines", name="Predicted"))
 
+                if levels["support"] is not None:
+                    fig2.add_hline(y=levels["support"], annotation_text="Support", line_dash="dot")
+                if levels["resistance"] is not None:
+                    fig2.add_hline(y=levels["resistance"], annotation_text="Resistance", line_dash="dot")
+
                 fig2.update_layout(
                     title="Historical + Forecast with Confidence Range",
                     xaxis_title="Date",
@@ -551,6 +726,14 @@ if run_btn:
                     )
                 )
                 st.dataframe(prediction_table, use_container_width=True)
+
+                forecast_csv = prediction_table.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="Download Forecast CSV",
+                    data=forecast_csv,
+                    file_name=f"{symbol.replace('^', '')}_forecast.csv",
+                    mime="text/csv"
+                )
             except Exception as ex:
                 st.error("❌ Prediction part incomplete due to processing error.")
                 st.code(str(ex))
@@ -593,16 +776,57 @@ if run_btn:
                 st.info("Backtest is hidden from sidebar settings.")
 
         with tab5:
-            st.subheader("📄 Latest Data")
-            out_df = data.tail(120).copy().reset_index()
-            st.dataframe(out_df, use_container_width=True)
+            st.subheader("🏢 Fundamentals")
 
-            csv_data = out_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download Latest Data CSV",
-                data=csv_data,
-                file_name=f"{symbol.replace('^', '')}_latest_data.csv",
-                mime="text/csv"
-            )
+            if not show_fundamentals:
+                st.info("Fundamentals are hidden from sidebar settings.")
+            elif not fundamentals:
+                st.warning("Fundamentals not available for this symbol right now.")
+            else:
+                name = fundamentals.get("longName", "") or symbol
+                st.markdown(f"### {name}")
 
-# st.caption("⚠️ This is an educational demo only. Not financial advice. Data from Yahoo Finance may be unreliable for some NSE/BSE symbols.")
+                f1, f2, f3, f4 = st.columns(4)
+                f1.metric("Market Cap", format_large_number(fundamentals.get("marketCap")))
+                f2.metric("Trailing PE", fmt_num(fundamentals.get("trailingPE")))
+                f3.metric("Forward PE", fmt_num(fundamentals.get("forwardPE")))
+                f4.metric("Dividend Yield %", f"{(fundamentals.get('dividendYield') or 0) * 100:.2f}" if fundamentals.get("dividendYield") is not None else "-")
+
+                f5, f6, f7, f8 = st.columns(4)
+                f5.metric("Book Value", fmt_num(fundamentals.get("bookValue")))
+                f6.metric("Price to Book", fmt_num(fundamentals.get("priceToBook")))
+                f7.metric("52W High", fmt_num(fundamentals.get("fiftyTwoWeekHigh")))
+                f8.metric("52W Low", fmt_num(fundamentals.get("fiftyTwoWeekLow")))
+
+                left, right = st.columns(2)
+                with left:
+                    st.write(f"**Sector:** {fundamentals.get('sector', '-') or '-'}")
+                    st.write(f"**Industry:** {fundamentals.get('industry', '-') or '-'}")
+                    st.write(f"**Currency:** {fundamentals.get('currency', '-') or '-'}")
+                with right:
+                    website = fundamentals.get("website", "")
+                    st.write(f"**Website:** {website if website else '-'}")
+
+        with tab6:
+            st.subheader("⭐ Watchlist Dashboard")
+
+            if not st.session_state.watchlist:
+                st.info("Your watchlist is empty.")
+            else:
+                with st.spinner("Building watchlist snapshot..."):
+                    wl_df = build_watchlist_snapshot(tuple(st.session_state.watchlist))
+
+                if wl_df.empty:
+                    st.warning("Watchlist data could not be loaded right now.")
+                else:
+                    st.dataframe(wl_df, use_container_width=True)
+
+                    csv_data = wl_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label="Download Watchlist CSV",
+                        data=csv_data,
+                        file_name="watchlist_snapshot.csv",
+                        mime="text/csv"
+                    )
+
+st.caption("⚠️ This is an educational demo only. Not financial advice. Data from Yahoo Finance may be unreliable for some NSE/BSE symbols.")
