@@ -7,10 +7,10 @@ import yfinance as yf
 from prophet import Prophet
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Indian Stock Market Predictor Pro+", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Indian Stock Market Predictor Pro++", page_icon="📈", layout="wide")
 
-st.title("📊 Indian Stock Market Predictor Pro+")
-st.markdown("**Real-time NSE/BSE data + Forecast + Technical Analysis + Signal Engine + Backtest + Fundamentals + Watchlist + Support/Resistance**")
+st.title("📊 Indian Stock Market Predictor Pro++")
+st.markdown("**Real-time NSE/BSE data + Forecast + Technical Analysis + Signal Engine + Backtest + Fundamentals + Watchlist + Support/Resistance + Comparison Mode**")
 
 
 # -----------------------------
@@ -448,6 +448,67 @@ def build_watchlist_snapshot(symbols: tuple) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@st.cache_data(show_spinner=False, ttl=600)
+def build_comparison_snapshot(symbols: tuple, days: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rows = []
+    norm_df = pd.DataFrame()
+
+    for sym in symbols:
+        try:
+            d = fetch_stock_data(sym)
+            if d.empty or len(d) < 50:
+                continue
+
+            d = add_indicators(d)
+
+            close = float(d["Close"].iloc[-1])
+            prev = float(d["Close"].iloc[-2])
+            day_change = close - prev
+            day_change_pct = (day_change / prev * 100) if prev else 0.0
+
+            ret_30 = ((float(d["Close"].iloc[-1]) / float(d["Close"].iloc[-31])) - 1) * 100 if len(d) > 31 else np.nan
+            ret_90 = ((float(d["Close"].iloc[-1]) / float(d["Close"].iloc[-91])) - 1) * 100 if len(d) > 91 else np.nan
+
+            sig = generate_signal(d)
+            risk_name, vol = risk_level(d)
+
+            forecast_end = np.nan
+            forecast_move_pct = np.nan
+            try:
+                _, fc = build_forecast(d, days)
+                future_rows = fc[["ds", "yhat"]].tail(days).copy()
+                forecast_end = float(future_rows["yhat"].iloc[-1])
+                forecast_move_pct = ((forecast_end / close) - 1) * 100 if close else np.nan
+            except Exception:
+                pass
+
+            rows.append({
+                "Symbol": sym,
+                "Price": round(close, 2),
+                "Day Change %": round(day_change_pct, 2),
+                "30D Return %": round(ret_30, 2) if pd.notna(ret_30) else None,
+                "90D Return %": round(ret_90, 2) if pd.notna(ret_90) else None,
+                "Volatility %": round(vol, 2),
+                "RSI14": round(float(d["RSI14"].iloc[-1]), 2) if pd.notna(d["RSI14"].iloc[-1]) else None,
+                "Signal": sig["label"],
+                "Confidence %": sig["confidence"],
+                "Risk": risk_name,
+                "Forecast End": round(forecast_end, 2) if pd.notna(forecast_end) else None,
+                "Forecast Move %": round(forecast_move_pct, 2) if pd.notna(forecast_move_pct) else None,
+            })
+
+            base = float(d["Close"].iloc[-30]) if len(d) >= 30 else float(d["Close"].iloc[0])
+            series = d["Close"].tail(60).copy()
+            norm_series = (series / base) * 100
+            norm_df[sym] = norm_series
+
+        except Exception:
+            continue
+
+    norm_df = norm_df.sort_index()
+    return pd.DataFrame(rows), norm_df
+
+
 # -----------------------------
 # Sidebar
 # -----------------------------
@@ -480,6 +541,18 @@ days = st.sidebar.slider("Days to Predict", min_value=7, max_value=60, value=15)
 show_backtest = st.sidebar.checkbox("Show Backtest", value=True)
 show_technical = st.sidebar.checkbox("Show Technical Indicators", value=True)
 show_fundamentals = st.sidebar.checkbox("Show Fundamentals", value=True)
+
+st.sidebar.markdown("### Comparison Mode")
+cmp1 = st.sidebar.text_input("Compare Stock 1", value="RELIANCE.NS").strip().upper()
+cmp2 = st.sidebar.text_input("Compare Stock 2", value="HDFCBANK.NS").strip().upper()
+cmp3 = st.sidebar.text_input("Compare Stock 3", value="TCS.NS").strip().upper()
+
+compare_symbols = []
+for s in [cmp1, cmp2, cmp3]:
+    if s:
+        ns = normalize_symbol(s)
+        if ns not in compare_symbols:
+            compare_symbols.append(ns)
 
 col_w1, col_w2 = st.sidebar.columns(2)
 with col_w1:
@@ -557,8 +630,8 @@ if run_btn:
             unsafe_allow_html=True
         )
 
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-            ["Overview", "Technical Analysis", "Forecast", "Backtest", "Fundamentals", "Watchlist"]
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+            ["Overview", "Technical Analysis", "Forecast", "Backtest", "Fundamentals", "Watchlist", "Comparison"]
         )
 
         with tab1:
@@ -829,4 +902,67 @@ if run_btn:
                         mime="text/csv"
                     )
 
-st.caption("⚠️ This is an educational demo only. Not financial advice. Data from Yahoo Finance may be unreliable for some NSE/BSE symbols.")
+        with tab7:
+            st.subheader("⚖️ Compare 2–3 Stocks")
+
+            if len(compare_symbols) < 2:
+                st.warning("Please enter at least 2 symbols in the sidebar for comparison.")
+            else:
+                st.write("Comparing:", ", ".join(compare_symbols))
+
+                with st.spinner("Building comparison view..."):
+                    cmp_df, norm_df = build_comparison_snapshot(tuple(compare_symbols), days)
+
+                if cmp_df.empty:
+                    st.warning("Comparison data could not be loaded.")
+                else:
+                    st.subheader("Comparison Snapshot")
+                    st.dataframe(cmp_df, use_container_width=True)
+
+                    st.subheader("Normalized Performance (Base = 100)")
+                    fig_cmp = go.Figure()
+                    for col in norm_df.columns:
+                        fig_cmp.add_trace(go.Scatter(x=norm_df.index, y=norm_df[col], mode="lines", name=col))
+                    fig_cmp.update_layout(
+                        title="Last 60 Sessions Normalized Comparison",
+                        xaxis_title="Date",
+                        yaxis_title="Normalized Value",
+                        height=500
+                    )
+                    st.plotly_chart(fig_cmp, use_container_width=True)
+
+                    st.subheader("30D Return Comparison")
+                    bar_df = cmp_df[["Symbol", "30D Return %"]].dropna().copy()
+                    if not bar_df.empty:
+                        fig_bar = go.Figure()
+                        fig_bar.add_trace(go.Bar(x=bar_df["Symbol"], y=bar_df["30D Return %"], name="30D Return %"))
+                        fig_bar.update_layout(
+                            title="30 Day Return %",
+                            xaxis_title="Symbol",
+                            yaxis_title="Return %",
+                            height=420
+                        )
+                        st.plotly_chart(fig_bar, use_container_width=True)
+
+                    st.subheader("Forecast End Price Comparison")
+                    fc_df = cmp_df[["Symbol", "Forecast End", "Forecast Move %"]].dropna().copy()
+                    if not fc_df.empty:
+                        fig_fc = go.Figure()
+                        fig_fc.add_trace(go.Bar(x=fc_df["Symbol"], y=fc_df["Forecast Move %"], name="Forecast Move %"))
+                        fig_fc.update_layout(
+                            title=f"Forecast Move % for Next {days} Days",
+                            xaxis_title="Symbol",
+                            yaxis_title="Forecast Move %",
+                            height=420
+                        )
+                        st.plotly_chart(fig_fc, use_container_width=True)
+
+                    csv_cmp = cmp_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label="Download Comparison CSV",
+                        data=csv_cmp,
+                        file_name="comparison_snapshot.csv",
+                        mime="text/csv"
+                    )
+
+# st.caption("⚠️ This is an educational demo only. Not financial advice. Data from Yahoo Finance may be unreliable for some NSE/BSE symbols.")
