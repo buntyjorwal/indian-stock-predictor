@@ -1,18 +1,22 @@
-import time
 import math
 import re
+import time
+from datetime import date, timedelta
+
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from prophet import Prophet
-import plotly.graph_objects as go
+
+try:
+    from nselib import capital_market
+except Exception:
+    capital_market = None
+
 
 st.set_page_config(page_title="Indian Stock Market Predictor Ultimate", page_icon="📈", layout="wide")
-
-st.title("📊 Indian Stock Market Predictor Ultimate")
-st.markdown("**Forecast + Technical Analysis + Fundamentals + Watchlist + Comparison + News Sentiment + Portfolio Tracker**")
-
 
 # -----------------------------
 # Session State
@@ -26,9 +30,64 @@ if "portfolio" not in st.session_state:
         {"Symbol": "HDFCBANK.NS", "Quantity": 5.0, "Buy Price": 1500.0},
     ]
 
+if "last_fetch_source" not in st.session_state:
+    st.session_state.last_fetch_source = "-"
+
+if "last_fetch_note" not in st.session_state:
+    st.session_state.last_fetch_note = ""
+
 
 # -----------------------------
-# Helpers
+# UI helpers
+# -----------------------------
+def inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+            .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
+            .app-card {
+                background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
+                padding: 18px 20px;
+                border-radius: 18px;
+                border: 1px solid rgba(255,255,255,0.08);
+                margin-bottom: 14px;
+            }
+            .app-card h3, .app-card p { margin: 0; }
+            .ai-box {
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                padding: 16px;
+                border-radius: 16px;
+            }
+            .disclaimer-box {
+                border-left: 6px solid #f59e0b;
+                background: #fff7ed;
+                padding: 14px 16px;
+                border-radius: 12px;
+                margin: 10px 0 16px 0;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def top_banner() -> None:
+    st.markdown(
+        """
+        <div class="app-card">
+            <h2>📊 Indian Stock Market Predictor Ultimate</h2>
+            <p style="margin-top:6px;opacity:0.9;">
+                Forecast + Technical Analysis + Fundamentals + Watchlist + Comparison + News Sentiment + Portfolio Tracker
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# -----------------------------
+# General helpers
 # -----------------------------
 def normalize_symbol(symbol_input: str) -> str:
     s = (symbol_input or "").strip().upper()
@@ -36,6 +95,17 @@ def normalize_symbol(symbol_input: str) -> str:
         return "^NSEI"
     if not s.endswith((".NS", ".BO")) and not s.startswith("^"):
         return s + ".NS"
+    return s
+
+
+def nse_symbol(symbol: str) -> str:
+    s = normalize_symbol(symbol)
+    if s.startswith("^"):
+        return s.replace("^", "")
+    if s.endswith(".NS"):
+        return s[:-3]
+    if s.endswith(".BO"):
+        return s[:-3]
     return s
 
 
@@ -69,51 +139,185 @@ def clean_market_data(df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Required columns not found: {', '.join(missing)}. Returned columns: {list(df.columns)}")
 
-    cleaned = pd.DataFrame(index=df.index)
+    cleaned = pd.DataFrame(index=pd.to_datetime(df.index))
     cleaned["Open"] = pd.to_numeric(df[open_col], errors="coerce")
     cleaned["High"] = pd.to_numeric(df[high_col], errors="coerce")
     cleaned["Low"] = pd.to_numeric(df[low_col], errors="coerce")
     cleaned["Close"] = pd.to_numeric(df[close_col], errors="coerce")
     cleaned["Volume"] = pd.to_numeric(df[volume_col], errors="coerce") if volume_col else np.nan
 
-    cleaned = cleaned.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+    cleaned = cleaned.dropna(subset=["Open", "High", "Low", "Close"]).sort_index().copy()
     return cleaned
 
 
+def format_large_number(x):
+    if x is None or pd.isna(x):
+        return "-"
+    x = float(x)
+    if x >= 1_00_00_00_000:
+        return f"₹ {x / 1_00_00_00_000:.2f} Cr"
+    if x >= 1_00_00_000:
+        return f"₹ {x / 1_00_00_000:.2f} Cr"
+    if x >= 1_00_000:
+        return f"₹ {x / 1_00_000:.2f} Lakh"
+    return f"₹ {x:,.2f}"
+
+
+def fmt_num(x) -> str:
+    try:
+        return f"{float(x):,.2f}"
+    except Exception:
+        return "-"
+
+
+# -----------------------------
+# Hybrid data fetching
+# -----------------------------
+def fetch_from_yfinance(symbol: str) -> pd.DataFrame:
+    raw = yf.download(
+        symbol,
+        period="2y",
+        interval="1d",
+        progress=False,
+        auto_adjust=True,
+        threads=False,
+    )
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    return clean_market_data(raw)
+
+
+def _try_nselib_call(func_name: str, symbol: str):
+    if capital_market is None or not hasattr(capital_market, func_name):
+        return None
+
+    func = getattr(capital_market, func_name)
+    to_dt = date.today()
+    from_dt = to_dt - timedelta(days=800)
+    symbol_nse = nse_symbol(symbol)
+
+    call_variants = [
+        {"symbol": symbol_nse, "from_date": from_dt, "to_date": to_dt},
+        {"symbol": symbol_nse, "from_date": from_dt.strftime("%d-%m-%Y"), "to_date": to_dt.strftime("%d-%m-%Y")},
+        {"symbol": symbol_nse, "from_date": from_dt.strftime("%Y-%m-%d"), "to_date": to_dt.strftime("%Y-%m-%d")},
+        {"symbol": symbol_nse, "start_date": from_dt, "end_date": to_dt},
+        {"symbol": symbol_nse, "start_date": from_dt.strftime("%d-%m-%Y"), "end_date": to_dt.strftime("%d-%m-%Y")},
+        {"symbol": symbol_nse},
+        {"security": symbol_nse, "from_date": from_dt.strftime("%d-%m-%Y"), "to_date": to_dt.strftime("%d-%m-%Y")},
+    ]
+
+    for kwargs in call_variants:
+        try:
+            data = func(**kwargs)
+            if data is not None:
+                return data
+        except Exception:
+            continue
+    return None
+
+
+def fetch_from_nselib(symbol: str) -> pd.DataFrame:
+    if capital_market is None:
+        return pd.DataFrame()
+    if symbol.startswith("^"):
+        return pd.DataFrame()
+
+    func_candidates = [
+        "price_volume_and_deliverable_position_data",
+        "equity_price_volume_data",
+        "bhav_copy_equities",
+    ]
+
+    raw = None
+    for func_name in func_candidates:
+        raw = _try_nselib_call(func_name, symbol)
+        if raw is not None:
+            break
+
+    if raw is None:
+        return pd.DataFrame()
+
+    if isinstance(raw, list):
+        df = pd.DataFrame(raw)
+    elif isinstance(raw, pd.DataFrame):
+        df = raw.copy()
+    else:
+        try:
+            df = pd.DataFrame(raw)
+        except Exception:
+            return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    rename_map = {}
+    for c in df.columns:
+        c_low = str(c).strip().lower()
+        if c_low in {"date", "mdate", "timestamp", "tradingdate", "trade_date", "bhavdate"}:
+            rename_map[c] = "Date"
+        elif c_low in {"open", "open price", "open_price", "prev open"}:
+            rename_map[c] = "Open"
+        elif c_low in {"high", "high price", "high_price"}:
+            rename_map[c] = "High"
+        elif c_low in {"low", "low price", "low_price"}:
+            rename_map[c] = "Low"
+        elif c_low in {"close", "close price", "close_price", "ltp", "last", "last_price"}:
+            rename_map[c] = "Close"
+        elif c_low in {"volume", "totaltradedvolume", "ttl_trd_qnty", "tradedqty", "traded_qty"}:
+            rename_map[c] = "Volume"
+
+    df = df.rename(columns=rename_map)
+    if "Date" not in df.columns:
+        for candidate in df.columns:
+            if "date" in str(candidate).lower():
+                df = df.rename(columns={candidate: "Date"})
+                break
+
+    needed = {"Date", "Open", "High", "Low", "Close"}
+    if not needed.issubset(set(df.columns)):
+        return pd.DataFrame()
+
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True)
+    df = df.dropna(subset=["Date"]).copy()
+    df = df.set_index("Date")
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = np.nan
+
+    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Open", "High", "Low", "Close"]).sort_index()
+    return df
+
+
 @st.cache_data(show_spinner=False, ttl=900)
-def fetch_stock_data(symbol: str) -> pd.DataFrame:
+def fetch_stock_data(symbol: str) -> tuple[pd.DataFrame, str, str]:
     last_error = None
 
-    for _ in range(5):
+    for _ in range(2):
         try:
-            raw = yf.download(
-                symbol,
-                period="2y",
-                interval="1d",
-                progress=False,
-                auto_adjust=True,
-                threads=False
-            )
-
-            if raw is None or raw.empty:
-                time.sleep(3)
-                continue
-
-            cleaned = clean_market_data(raw)
-            if len(cleaned) >= 50:
-                return cleaned
-
+            yf_df = fetch_from_yfinance(symbol)
+            if len(yf_df) >= 50:
+                return yf_df, "yfinance", "Primary source loaded successfully."
         except Exception as ex:
             last_error = ex
+        time.sleep(1)
 
-        time.sleep(3)
+    try:
+        nse_df = fetch_from_nselib(symbol)
+        if len(nse_df) >= 50:
+            return nse_df, "nselib", "Fallback source used because yfinance was unavailable or incomplete."
+    except Exception as ex:
+        last_error = ex
 
     if last_error:
         raise last_error
+    return pd.DataFrame(), "none", "No market data returned from available sources."
 
-    return pd.DataFrame()
 
-
+# -----------------------------
+# Analytics
+# -----------------------------
 def add_indicators(data: pd.DataFrame) -> pd.DataFrame:
     df = data.copy()
 
@@ -167,13 +371,12 @@ def build_forecast(data: pd.DataFrame, days: int) -> tuple[pd.DataFrame, pd.Data
         daily_seasonality=False,
         weekly_seasonality=True,
         yearly_seasonality=True,
-        changepoint_prior_scale=0.15
+        changepoint_prior_scale=0.15,
     )
     model.fit(df)
 
     future = model.make_future_dataframe(periods=days)
     forecast = model.predict(future)
-
     return df, forecast
 
 
@@ -200,10 +403,9 @@ def simple_backtest(data: pd.DataFrame, holdout_days: int = 30) -> dict:
             daily_seasonality=False,
             weekly_seasonality=True,
             yearly_seasonality=True,
-            changepoint_prior_scale=0.15
+            changepoint_prior_scale=0.15,
         )
         model.fit(train)
-
         future = model.make_future_dataframe(periods=holdout_days)
         fc = model.predict(future)[["ds", "yhat"]].tail(holdout_days).copy()
 
@@ -219,20 +421,13 @@ def simple_backtest(data: pd.DataFrame, holdout_days: int = 30) -> dict:
         rmse = float(math.sqrt(merged["sq_err"].mean()))
         mape = float((merged["pct_err"].dropna().mean()) * 100)
 
-        return {
-            "ok": True,
-            "mae": mae,
-            "rmse": rmse,
-            "mape": mape,
-            "actual_pred": merged
-        }
+        return {"ok": True, "mae": mae, "rmse": rmse, "mape": mape, "actual_pred": merged}
     except Exception as ex:
         return {"ok": False, "reason": str(ex)}
 
 
 def generate_signal(df: pd.DataFrame) -> dict:
     last = df.iloc[-1]
-
     score = 0
     reasons = []
 
@@ -285,45 +480,30 @@ def generate_signal(df: pd.DataFrame) -> dict:
             reasons.append("MACD bearish bias")
 
     if score >= 4:
-        label = "BUY"
-        color = "green"
+        label, color = "BUY", "green"
     elif score >= 2:
-        label = "WEAK BUY"
-        color = "green"
+        label, color = "WEAK BUY", "green"
     elif score <= -4:
-        label = "SELL"
-        color = "red"
+        label, color = "SELL", "red"
     elif score <= -2:
-        label = "WEAK SELL"
-        color = "red"
+        label, color = "WEAK SELL", "red"
     else:
-        label = "HOLD"
-        color = "orange"
+        label, color = "HOLD", "orange"
 
     confidence = min(95, max(35, 50 + (abs(score) * 8)))
-
-    return {
-        "label": label,
-        "score": score,
-        "reasons": reasons,
-        "color": color,
-        "confidence": confidence
-    }
+    return {"label": label, "score": score, "reasons": reasons, "color": color, "confidence": confidence}
 
 
 def risk_level(df: pd.DataFrame) -> tuple[str, float]:
     daily_ret = df["Close"].pct_change().dropna()
     if daily_ret.empty:
         return "Unknown", 0.0
-
     vol_annual = float(daily_ret.std() * np.sqrt(252) * 100)
-
     if vol_annual < 20:
         return "Low", vol_annual
-    elif vol_annual < 35:
+    if vol_annual < 35:
         return "Moderate", vol_annual
-    else:
-        return "High", vol_annual
+    return "High", vol_annual
 
 
 def get_support_resistance(df: pd.DataFrame) -> dict:
@@ -332,43 +512,54 @@ def get_support_resistance(df: pd.DataFrame) -> dict:
         return {"support": None, "resistance": None, "stop_loss": None, "breakout": None}
 
     current = float(recent["Close"].iloc[-1])
-
     supports = sorted(recent["Low"].dropna().unique().tolist())
     resistances = sorted(recent["High"].dropna().unique().tolist())
-
-    support = None
-    resistance = None
 
     lower_supports = [x for x in supports if x < current]
     higher_resistances = [x for x in resistances if x > current]
 
-    if lower_supports:
-        support = max(lower_supports)
-    if higher_resistances:
-        resistance = min(higher_resistances)
+    support = max(lower_supports) if lower_supports else None
+    resistance = min(higher_resistances) if higher_resistances else None
 
-    stop_loss = None
-    breakout = None
-
-    if support is not None:
-        stop_loss = round(support * 0.985, 2)
-    if resistance is not None:
-        breakout = round(resistance * 1.01, 2)
+    stop_loss = round(support * 0.985, 2) if support is not None else None
+    breakout = round(resistance * 1.01, 2) if resistance is not None else None
 
     return {
         "support": round(support, 2) if support is not None else None,
         "resistance": round(resistance, 2) if resistance is not None else None,
         "stop_loss": stop_loss,
-        "breakout": breakout
+        "breakout": breakout,
     }
 
 
+def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_tail: pd.DataFrame | None, risk_name: str, volatility: float, levels: dict) -> str:
+    move_text = "Forecast currently unavailable."
+    if forecast_tail is not None and not forecast_tail.empty:
+        final_pred = float(forecast_tail["yhat"].iloc[-1])
+        delta = final_pred - current_price
+        delta_pct = (delta / current_price * 100) if current_price else 0
+        direction = "upside" if delta >= 0 else "downside"
+        move_text = f"Model forecast suggests {abs(delta_pct):.2f}% {direction} over the selected horizon."
+
+    reasons = ", ".join(signal["reasons"][:4]) if signal["reasons"] else "limited technical confirmation"
+    support_text = f"Nearest support is ₹ {fmt_num(levels['support'])}" if levels["support"] is not None else "Support level is not clearly identified"
+    resistance_text = f"nearest resistance is ₹ {fmt_num(levels['resistance'])}" if levels["resistance"] is not None else "resistance level is not clearly identified"
+
+    return (
+        f"For {symbol}, the technical signal is {signal['label']} with {signal['confidence']}% confidence. "
+        f"Key drivers are: {reasons}. {move_text} Annualized volatility is {volatility:.2f}%, so risk is classified as {risk_name}. "
+        f"{support_text}, and {resistance_text}. This is a model-assisted summary, not trading advice."
+    )
+
+
+# -----------------------------
+# External info blocks
+# -----------------------------
 @st.cache_data(show_spinner=False, ttl=1800)
 def fetch_fundamentals(symbol: str) -> dict:
     try:
         tk = yf.Ticker(symbol)
         info = tk.info if hasattr(tk, "info") else {}
-
         return {
             "longName": info.get("longName", ""),
             "sector": info.get("sector", ""),
@@ -392,24 +583,21 @@ def simple_sentiment_score(text: str) -> tuple[str, int]:
     positive_words = {
         "gain", "gains", "surge", "surges", "up", "beat", "beats", "strong", "growth", "bullish",
         "profit", "profits", "record", "expands", "expansion", "buy", "outperform", "positive",
-        "rise", "rises", "jump", "jumps", "higher", "improves", "improvement"
+        "rise", "rises", "jump", "jumps", "higher", "improves", "improvement",
     }
     negative_words = {
         "fall", "falls", "down", "miss", "misses", "weak", "loss", "losses", "bearish", "drop",
         "drops", "lower", "cuts", "cut", "decline", "declines", "risk", "risks", "warning",
-        "lawsuit", "probe", "crash", "slump", "pressure"
+        "lawsuit", "probe", "crash", "slump", "pressure",
     }
 
-    text = (text or "").lower()
-    words = re.findall(r"[a-zA-Z]+", text)
-
+    words = re.findall(r"[a-zA-Z]+", (text or "").lower())
     pos = sum(1 for w in words if w in positive_words)
     neg = sum(1 for w in words if w in negative_words)
     score = pos - neg
-
     if score > 0:
         return "Positive", score
-    elif score < 0:
+    if score < 0:
         return "Negative", score
     return "Neutral", score
 
@@ -421,17 +609,14 @@ def fetch_news(symbol: str) -> pd.DataFrame:
         news_items = getattr(tk, "news", None)
         if not news_items:
             return pd.DataFrame()
-
         rows = []
         for item in news_items[:15]:
             title = item.get("title", "")
             publisher = item.get("publisher", "")
             link = item.get("link", "")
             provider_time = item.get("providerPublishTime", None)
-
             published = pd.to_datetime(provider_time, unit="s", errors="coerce") if provider_time else pd.NaT
             sentiment, score = simple_sentiment_score(title)
-
             rows.append({
                 "Published": published,
                 "Title": title,
@@ -440,7 +625,6 @@ def fetch_news(symbol: str) -> pd.DataFrame:
                 "SentimentScore": score,
                 "Link": link,
             })
-
         df = pd.DataFrame(rows)
         if not df.empty:
             df = df.sort_values("Published", ascending=False)
@@ -449,26 +633,9 @@ def fetch_news(symbol: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def format_large_number(x):
-    if x is None or pd.isna(x):
-        return "-"
-    x = float(x)
-    if x >= 1_00_00_00_000:
-        return f"₹ {x / 1_00_00_00_000:.2f} Cr"
-    if x >= 1_00_00_000:
-        return f"₹ {x / 1_00_00_000:.2f} Cr"
-    if x >= 1_00_000:
-        return f"₹ {x / 1_00_000:.2f} Lakh"
-    return f"₹ {x:,.2f}"
-
-
-def fmt_num(x) -> str:
-    try:
-        return f"{float(x):,.2f}"
-    except Exception:
-        return "-"
-
-
+# -----------------------------
+# Watchlist / comparison / portfolio
+# -----------------------------
 def add_to_watchlist(symbol: str):
     symbol = normalize_symbol(symbol)
     if symbol not in st.session_state.watchlist:
@@ -482,11 +649,7 @@ def remove_from_watchlist(symbol: str):
 
 def add_portfolio_row(symbol: str, qty: float, buy_price: float):
     symbol = normalize_symbol(symbol)
-    st.session_state.portfolio.append({
-        "Symbol": symbol,
-        "Quantity": float(qty),
-        "Buy Price": float(buy_price)
-    })
+    st.session_state.portfolio.append({"Symbol": symbol, "Quantity": float(qty), "Buy Price": float(buy_price)})
 
 
 def remove_portfolio_row(index: int):
@@ -497,22 +660,18 @@ def remove_portfolio_row(index: int):
 @st.cache_data(show_spinner=False, ttl=600)
 def build_watchlist_snapshot(symbols: tuple) -> pd.DataFrame:
     rows = []
-
     for sym in symbols:
         try:
-            d = fetch_stock_data(sym)
+            d, _, _ = fetch_stock_data(sym)
             if d.empty or len(d) < 3:
                 continue
-
             d = add_indicators(d)
             close = float(d["Close"].iloc[-1])
             prev = float(d["Close"].iloc[-2])
             chg = close - prev
             chg_pct = (chg / prev * 100) if prev else 0.0
-
             sig = generate_signal(d)
-            risk_name, vol = risk_level(d)
-
+            risk_name, _ = risk_level(d)
             rows.append({
                 "Symbol": sym,
                 "Price": round(close, 2),
@@ -526,7 +685,6 @@ def build_watchlist_snapshot(symbols: tuple) -> pd.DataFrame:
             })
         except Exception:
             continue
-
     return pd.DataFrame(rows)
 
 
@@ -534,23 +692,17 @@ def build_watchlist_snapshot(symbols: tuple) -> pd.DataFrame:
 def build_comparison_snapshot(symbols: tuple, days: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows = []
     norm_df = pd.DataFrame()
-
     for sym in symbols:
         try:
-            d = fetch_stock_data(sym)
+            d, _, _ = fetch_stock_data(sym)
             if d.empty or len(d) < 50:
                 continue
-
             d = add_indicators(d)
-
             close = float(d["Close"].iloc[-1])
             prev = float(d["Close"].iloc[-2])
-            day_change = close - prev
-            day_change_pct = (day_change / prev * 100) if prev else 0.0
-
+            day_change_pct = ((close - prev) / prev * 100) if prev else 0.0
             ret_30 = ((float(d["Close"].iloc[-1]) / float(d["Close"].iloc[-31])) - 1) * 100 if len(d) > 31 else np.nan
             ret_90 = ((float(d["Close"].iloc[-1]) / float(d["Close"].iloc[-91])) - 1) * 100 if len(d) > 91 else np.nan
-
             sig = generate_signal(d)
             risk_name, vol = risk_level(d)
 
@@ -581,20 +733,16 @@ def build_comparison_snapshot(symbols: tuple, days: int) -> tuple[pd.DataFrame, 
 
             series = d["Close"].tail(60).copy()
             base = float(series.iloc[0]) if len(series) > 0 else 1.0
-            norm_series = (series / base) * 100
-            norm_df[sym] = norm_series
-
+            norm_df[sym] = (series / base) * 100
         except Exception:
             continue
-
-    norm_df = norm_df.sort_index()
-    return pd.DataFrame(rows), norm_df
+    return pd.DataFrame(rows), norm_df.sort_index()
 
 
 @st.cache_data(show_spinner=False, ttl=300)
 def current_price_for_symbol(symbol: str):
     try:
-        d = fetch_stock_data(symbol)
+        d, _, _ = fetch_stock_data(symbol)
         if d.empty:
             return None
         return float(d["Close"].iloc[-1])
@@ -604,22 +752,18 @@ def current_price_for_symbol(symbol: str):
 
 def build_portfolio_snapshot(portfolio_rows: list) -> pd.DataFrame:
     rows = []
-
     for row in portfolio_rows:
         try:
             sym = normalize_symbol(row["Symbol"])
             qty = float(row["Quantity"])
             buy_price = float(row["Buy Price"])
-
             current_price = current_price_for_symbol(sym)
             if current_price is None:
                 continue
-
             invested = qty * buy_price
             current_value = qty * current_price
             pnl = current_value - invested
             pnl_pct = (pnl / invested * 100) if invested else 0.0
-
             rows.append({
                 "Symbol": sym,
                 "Quantity": qty,
@@ -632,15 +776,16 @@ def build_portfolio_snapshot(portfolio_rows: list) -> pd.DataFrame:
             })
         except Exception:
             continue
-
     return pd.DataFrame(rows)
 
 
 # -----------------------------
 # Sidebar
 # -----------------------------
-st.sidebar.header("Stock Selection")
+inject_css()
+top_banner()
 
+st.sidebar.header("Stock Selection")
 quick_stocks = {
     "RELIANCE": "RELIANCE.NS",
     "HDFCBANK": "HDFCBANK.NS",
@@ -651,19 +796,11 @@ quick_stocks = {
     "NIFTY": "^NSEI",
 }
 
-selected_quick = st.sidebar.selectbox(
-    "Quick Select",
-    ["Custom"] + list(quick_stocks.keys()),
-    index=0
-)
-
-default_symbol = "RELIANCE.NS"
-if selected_quick != "Custom":
-    default_symbol = quick_stocks[selected_quick]
+selected_quick = st.sidebar.selectbox("Quick Select", ["Custom"] + list(quick_stocks.keys()), index=0)
+default_symbol = quick_stocks[selected_quick] if selected_quick != "Custom" else "RELIANCE.NS"
 
 symbol_input = st.sidebar.text_input("Enter Stock Symbol", value=default_symbol).strip().upper()
 symbol = normalize_symbol(symbol_input)
-
 days = st.sidebar.slider("Days to Predict", min_value=7, max_value=60, value=15)
 show_backtest = st.sidebar.checkbox("Show Backtest", value=True)
 show_technical = st.sidebar.checkbox("Show Technical Indicators", value=True)
@@ -673,7 +810,6 @@ st.sidebar.markdown("### Comparison Mode")
 cmp1 = st.sidebar.text_input("Compare Stock 1", value="RELIANCE.NS").strip().upper()
 cmp2 = st.sidebar.text_input("Compare Stock 2", value="HDFCBANK.NS").strip().upper()
 cmp3 = st.sidebar.text_input("Compare Stock 3", value="TCS.NS").strip().upper()
-
 compare_symbols = []
 for s in [cmp1, cmp2, cmp3]:
     if s:
@@ -698,44 +834,92 @@ if st.session_state.watchlist:
 else:
     st.sidebar.write("No watchlist items")
 
-run_btn = st.sidebar.button("Fetch Data & Predict", type="primary")
+c1, c2 = st.sidebar.columns(2)
+with c1:
+    run_btn = st.button("Fetch Data & Predict", type="primary", use_container_width=True)
+with c2:
+    refresh_btn = st.button("Refresh All Data", use_container_width=True)
+
+if refresh_btn:
+    st.cache_data.clear()
+    st.success("All cached data cleared. Fresh market data will be fetched on the next run.")
+
+st.markdown(
+    """
+    <div class="disclaimer-box">
+        <b>Disclaimer:</b> This app is for educational and research purposes only. Forecasts and signals are model-based estimates,
+        not financial advice. Always verify with multiple sources and use your own judgment before taking any trade or investment decision.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # -----------------------------
 # Main
 # -----------------------------
 if run_btn:
-    with st.spinner(f"Fetching data for **{symbol}**..."):
-        try:
-            raw_data = fetch_stock_data(symbol)
-        except Exception as ex:
-            raw_data = pd.DataFrame()
-            st.error(f"❌ Error while fetching data for **{symbol}**")
-            st.code(str(ex))
+    loading_msg = st.empty()
+    progress = st.progress(0)
 
-    if raw_data.empty or len(raw_data) < 50:
-        st.error(f"❌ Could not fetch enough data for **{symbol}** right now.")
-        st.info("Try these symbols: RELIANCE.NS, HDFCBANK.NS, TCS.NS, INFY.NS, SBIN.NS, ITC.NS, ^NSEI")
-    else:
+    try:
+        loading_msg.info(f"Loading market data for {symbol}...")
+        progress.progress(15)
+
+        raw_data, source_used, source_note = fetch_stock_data(symbol)
+        st.session_state.last_fetch_source = source_used
+        st.session_state.last_fetch_note = source_note
+        progress.progress(45)
+
+        if raw_data.empty or len(raw_data) < 50:
+            progress.empty()
+            loading_msg.empty()
+            st.error(f"Could not fetch enough usable data for {symbol}.")
+            st.info("Try symbols like RELIANCE.NS, HDFCBANK.NS, TCS.NS, INFY.NS, SBIN.NS, ITC.NS or ^NSEI.")
+            st.stop()
+
+        loading_msg.info("Processing indicators, forecast, fundamentals, and news...")
         data = add_indicators(raw_data)
-
         close_series = pd.to_numeric(data["Close"], errors="coerce").dropna()
         current_price = float(close_series.iloc[-1])
         prev_price = float(close_series.iloc[-2]) if len(close_series) > 1 else current_price
         day_change = current_price - prev_price
         day_change_pct = (day_change / prev_price * 100) if prev_price else 0
-
         high_52w = float(data["Close"].tail(252).max()) if len(data) >= 20 else current_price
         low_52w = float(data["Close"].tail(252).min()) if len(data) >= 20 else current_price
         avg_volume = float(data["Volume"].tail(20).mean()) if data["Volume"].notna().any() else 0.0
-
         signal = generate_signal(data)
         risk_name, volatility = risk_level(data)
         levels = get_support_resistance(data)
+        progress.progress(70)
+
         fundamentals = fetch_fundamentals(symbol) if show_fundamentals else {}
         news_df = fetch_news(symbol)
+        progress.progress(88)
 
-        st.success(f"✅ Data loaded for **{symbol}**")
+        forecast_error = None
+        hist_df = None
+        forecast = None
+        future_rows = None
+        try:
+            hist_df, forecast = build_forecast(data, days)
+            future_rows = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(days).copy()
+        except Exception as ex:
+            forecast_error = str(ex)
+
+        ai_summary = build_ai_insight(symbol, current_price, signal, future_rows, risk_name, volatility, levels)
+        progress.progress(100)
+        progress.empty()
+        loading_msg.empty()
+
+        source_label = {
+            "yfinance": "yfinance",
+            "nselib": "nselib fallback",
+            "none": "unknown source",
+        }.get(source_used, source_used)
+        st.success(f"Data loaded for {symbol} using {source_label}.")
+        if source_note:
+            st.caption(source_note)
 
         m1, m2, m3, m4, m5, m6 = st.columns(6)
         m1.metric("Current Price", f"₹ {fmt_num(current_price)}", f"{day_change:,.2f}")
@@ -747,16 +931,18 @@ if run_btn:
 
         st.markdown(
             f"""
-            <div style="padding:12px 16px;border-radius:12px;background:#111827;margin:10px 0 18px 0;">
-                <span style="font-size:18px;font-weight:700;">Signal:</span>
+            <div style="padding:12px 16px;border-radius:12px;background:#111827;margin:10px 0 12px 0;">
+                <span style="font-size:18px;font-weight:700;color:white;">Signal:</span>
                 <span style="font-size:20px;font-weight:800;color:{signal['color']};margin-left:8px;">{signal['label']}</span>
-                <span style="margin-left:16px;font-size:16px;">Confidence: <b>{signal['confidence']}%</b></span>
-                <span style="margin-left:16px;font-size:16px;">Risk: <b>{risk_name}</b></span>
-                <span style="margin-left:16px;font-size:16px;">Score: <b>{signal['score']}</b></span>
+                <span style="margin-left:16px;font-size:16px;color:white;">Confidence: <b>{signal['confidence']}%</b></span>
+                <span style="margin-left:16px;font-size:16px;color:white;">Risk: <b>{risk_name}</b></span>
+                <span style="margin-left:16px;font-size:16px;color:white;">Score: <b>{signal['score']}</b></span>
             </div>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
+
+        st.markdown(f"<div class='ai-box'><b>🧠 AI Insight</b><br><br>{ai_summary}</div>", unsafe_allow_html=True)
 
         tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
             ["Overview", "Technical Analysis", "Forecast", "Backtest", "Fundamentals", "Watchlist", "Comparison", "News Sentiment", "Portfolio"]
@@ -764,34 +950,16 @@ if run_btn:
 
         with tab1:
             st.subheader(f"📉 {symbol} Price Overview")
-
             fig = go.Figure()
-            fig.add_trace(
-                go.Candlestick(
-                    x=data.index,
-                    open=data["Open"],
-                    high=data["High"],
-                    low=data["Low"],
-                    close=data["Close"],
-                    name="Price"
-                )
-            )
+            fig.add_trace(go.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"], name="Price"))
             fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], mode="lines", name="SMA20"))
             fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode="lines", name="SMA50"))
             fig.add_trace(go.Scatter(x=data.index, y=data["SMA200"], mode="lines", name="SMA200"))
-
             if levels["support"] is not None:
                 fig.add_hline(y=levels["support"], annotation_text=f"Support {levels['support']}", line_dash="dot")
             if levels["resistance"] is not None:
                 fig.add_hline(y=levels["resistance"], annotation_text=f"Resistance {levels['resistance']}", line_dash="dot")
-
-            fig.update_layout(
-                title=f"{symbol} Historical Price with Moving Averages",
-                xaxis_title="Date",
-                yaxis_title="Price",
-                xaxis_rangeslider_visible=False,
-                height=650
-            )
+            fig.update_layout(title=f"{symbol} Historical Price with Moving Averages", xaxis_title="Date", yaxis_title="Price", xaxis_rangeslider_visible=False, height=650)
             st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("🎯 Support / Resistance")
@@ -804,9 +972,7 @@ if run_btn:
         with tab2:
             if show_technical:
                 st.subheader("📊 RSI & MACD")
-
                 t1, t2 = st.columns(2)
-
                 with t1:
                     fig_rsi = go.Figure()
                     fig_rsi.add_trace(go.Scatter(x=data.index, y=data["RSI14"], mode="lines", name="RSI14"))
@@ -814,7 +980,6 @@ if run_btn:
                     fig_rsi.add_hline(y=30)
                     fig_rsi.update_layout(title="RSI (14)", xaxis_title="Date", yaxis_title="RSI", height=350)
                     st.plotly_chart(fig_rsi, use_container_width=True)
-
                 with t2:
                     fig_macd = go.Figure()
                     fig_macd.add_trace(go.Scatter(x=data.index, y=data["MACD"], mode="lines", name="MACD"))
@@ -834,15 +999,14 @@ if run_btn:
 
         with tab3:
             st.subheader(f"📈 Prediction for Next {days} Days")
-
-            try:
-                hist_df, forecast = build_forecast(data, days)
-                future_rows = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(days).copy()
-
+            if future_rows is None or future_rows.empty:
+                st.warning("Prediction is not available right now.")
+                if forecast_error:
+                    st.code(forecast_error)
+            else:
                 final_pred = float(future_rows["yhat"].iloc[-1])
                 final_lower = float(future_rows["yhat_lower"].iloc[-1])
                 final_upper = float(future_rows["yhat_upper"].iloc[-1])
-
                 trend = "Bullish 📈" if final_pred > current_price else "Bearish 📉"
                 expected_move = final_pred - current_price
                 expected_move_pct = (expected_move / current_price * 100) if current_price else 0
@@ -852,7 +1016,6 @@ if run_btn:
                 p2.metric("Expected Move", f"₹ {expected_move:,.2f}", f"{expected_move_pct:,.2f}%")
                 p3.metric("Range Low", f"₹ {fmt_num(final_lower)}")
                 p4.metric("Range High", f"₹ {fmt_num(final_upper)}")
-
                 st.info(f"Prediction Status: Complete ✅ | Trend Outlook: {trend}")
 
                 fig2 = go.Figure()
@@ -863,17 +1026,11 @@ if run_btn:
                 fig2.update_layout(title="Historical + Forecast", xaxis_title="Date", yaxis_title="Price", height=560)
                 st.plotly_chart(fig2, use_container_width=True)
 
-                prediction_table = future_rows.round(2).rename(
-                    columns={"ds": "Date", "yhat": "Predicted ₹", "yhat_lower": "Lower ₹", "yhat_upper": "Upper ₹"}
-                )
+                prediction_table = future_rows.round(2).rename(columns={"ds": "Date", "yhat": "Predicted ₹", "yhat_lower": "Lower ₹", "yhat_upper": "Upper ₹"})
                 st.dataframe(prediction_table, use_container_width=True)
-            except Exception as ex:
-                st.error("❌ Prediction part incomplete due to processing error.")
-                st.code(str(ex))
 
         with tab4:
             st.subheader("🧪 Backtest Accuracy")
-
             if show_backtest:
                 bt = simple_backtest(data, holdout_days=30)
                 if bt["ok"]:
@@ -881,7 +1038,6 @@ if run_btn:
                     b1.metric("MAE", f"{bt['mae']:.2f}")
                     b2.metric("RMSE", f"{bt['rmse']:.2f}")
                     b3.metric("MAPE", f"{bt['mape']:.2f}%")
-
                     backtest_df = bt["actual_pred"].copy()
                     fig_bt = go.Figure()
                     fig_bt.add_trace(go.Scatter(x=backtest_df["ds"], y=backtest_df["y"], mode="lines", name="Actual"))
@@ -895,7 +1051,6 @@ if run_btn:
 
         with tab5:
             st.subheader("🏢 Fundamentals")
-
             if not show_fundamentals:
                 st.info("Fundamentals are hidden from sidebar settings.")
             elif not fundamentals:
@@ -903,13 +1058,11 @@ if run_btn:
             else:
                 name = fundamentals.get("longName", "") or symbol
                 st.markdown(f"### {name}")
-
                 f1, f2, f3, f4 = st.columns(4)
                 f1.metric("Market Cap", format_large_number(fundamentals.get("marketCap")))
                 f2.metric("Trailing PE", fmt_num(fundamentals.get("trailingPE")))
                 f3.metric("Forward PE", fmt_num(fundamentals.get("forwardPE")))
                 f4.metric("Dividend Yield %", f"{(fundamentals.get('dividendYield') or 0) * 100:.2f}" if fundamentals.get("dividendYield") is not None else "-")
-
                 f5, f6, f7, f8 = st.columns(4)
                 f5.metric("Book Value", fmt_num(fundamentals.get("bookValue")))
                 f6.metric("Price to Book", fmt_num(fundamentals.get("priceToBook")))
@@ -918,124 +1071,78 @@ if run_btn:
 
         with tab6:
             st.subheader("⭐ Watchlist Dashboard")
-
             if not st.session_state.watchlist:
                 st.info("Your watchlist is empty.")
             else:
-                with st.spinner("Building watchlist snapshot..."):
-                    wl_df = build_watchlist_snapshot(tuple(st.session_state.watchlist))
-
+                wl_df = build_watchlist_snapshot(tuple(st.session_state.watchlist))
                 if wl_df.empty:
-                    st.warning("Watchlist data could not be loaded right now.")
+                    st.warning("Watchlist data is not available right now.")
                 else:
                     st.dataframe(wl_df, use_container_width=True)
 
         with tab7:
-            st.subheader("⚖️ Compare 2–3 Stocks")
-
+            st.subheader("⚖️ Comparison Dashboard")
             if len(compare_symbols) < 2:
-                st.warning("Please enter at least 2 symbols in the sidebar for comparison.")
+                st.info("Add at least 2 stocks in comparison mode.")
             else:
-                with st.spinner("Building comparison view..."):
-                    cmp_df, norm_df = build_comparison_snapshot(tuple(compare_symbols), days)
-
+                cmp_df, norm_df = build_comparison_snapshot(tuple(compare_symbols), days)
                 if cmp_df.empty:
-                    st.warning("Comparison data could not be loaded.")
+                    st.warning("Comparison data not available right now.")
                 else:
                     st.dataframe(cmp_df, use_container_width=True)
-
-                    fig_cmp = go.Figure()
-                    for col in norm_df.columns:
-                        fig_cmp.add_trace(go.Scatter(x=norm_df.index, y=norm_df[col], mode="lines", name=col))
-                    fig_cmp.update_layout(title="Normalized Performance", xaxis_title="Date", yaxis_title="Base = 100", height=500)
-                    st.plotly_chart(fig_cmp, use_container_width=True)
+                    if not norm_df.empty:
+                        fig_cmp = go.Figure()
+                        for col in norm_df.columns:
+                            fig_cmp.add_trace(go.Scatter(x=norm_df.index, y=norm_df[col], mode="lines", name=col))
+                        fig_cmp.update_layout(title="60-Day Relative Performance (Base = 100)", xaxis_title="Date", yaxis_title="Indexed Value", height=500)
+                        st.plotly_chart(fig_cmp, use_container_width=True)
 
         with tab8:
             st.subheader("📰 News Sentiment")
-
             if news_df.empty:
-                st.warning("No recent news available for this symbol right now.")
+                st.info("Recent news not available right now.")
             else:
-                pos_count = int((news_df["Sentiment"] == "Positive").sum())
-                neg_count = int((news_df["Sentiment"] == "Negative").sum())
-                neu_count = int((news_df["Sentiment"] == "Neutral").sum())
-                avg_score = float(news_df["SentimentScore"].mean()) if not news_df.empty else 0.0
-
-                n1, n2, n3, n4 = st.columns(4)
-                n1.metric("Positive Headlines", pos_count)
-                n2.metric("Negative Headlines", neg_count)
-                n3.metric("Neutral Headlines", neu_count)
-                n4.metric("Avg Sentiment Score", f"{avg_score:.2f}")
-
-                overall = "Positive" if avg_score > 0 else "Negative" if avg_score < 0 else "Neutral"
-                st.info(f"Overall headline sentiment: {overall}")
-
-                display_df = news_df.copy()
-                display_df["Published"] = pd.to_datetime(display_df["Published"], errors="coerce")
-                display_df["Published"] = display_df["Published"].dt.strftime("%Y-%m-%d %H:%M")
-                st.dataframe(display_df[["Published", "Publisher", "Title", "Sentiment", "SentimentScore", "Link"]], use_container_width=True)
+                st.dataframe(news_df[["Published", "Title", "Publisher", "Sentiment", "SentimentScore"]], use_container_width=True)
 
         with tab9:
             st.subheader("💼 Portfolio Tracker")
+            pf1, pf2, pf3 = st.columns(3)
+            with pf1:
+                pf_symbol = st.text_input("Portfolio Symbol", value="SBIN.NS")
+            with pf2:
+                pf_qty = st.number_input("Quantity", min_value=0.0, value=1.0, step=1.0)
+            with pf3:
+                pf_buy = st.number_input("Buy Price", min_value=0.0, value=100.0, step=1.0)
 
-            with st.expander("Add Holding", expanded=False):
-                pcol1, pcol2, pcol3, pcol4 = st.columns(4)
-                with pcol1:
-                    port_symbol = st.text_input("Portfolio Symbol", value="SBIN.NS")
-                with pcol2:
-                    port_qty = st.number_input("Quantity", min_value=0.0, value=1.0, step=1.0)
-                with pcol3:
-                    port_buy = st.number_input("Buy Price", min_value=0.0, value=100.0, step=1.0)
-                with pcol4:
-                    st.write("")
-                    st.write("")
-                    if st.button("Add Holding"):
-                        add_portfolio_row(port_symbol, port_qty, port_buy)
-                        st.success("Holding added.")
+            add_col, remove_col = st.columns(2)
+            with add_col:
+                if st.button("Add Portfolio Row"):
+                    add_portfolio_row(pf_symbol, pf_qty, pf_buy)
+                    st.success("Portfolio row added.")
+            with remove_col:
+                if st.session_state.portfolio and st.button("Remove Last Row"):
+                    remove_portfolio_row(len(st.session_state.portfolio) - 1)
+                    st.warning("Last portfolio row removed.")
 
-            if st.session_state.portfolio:
-                raw_port_df = pd.DataFrame(st.session_state.portfolio)
-                raw_port_df.index = range(len(raw_port_df))
-                st.write("Current Holdings Input")
-                st.dataframe(raw_port_df, use_container_width=True)
-
-                remove_index = st.number_input("Remove holding index", min_value=0, max_value=max(0, len(st.session_state.portfolio) - 1), value=0, step=1)
-                if st.button("Remove Holding"):
-                    remove_portfolio_row(int(remove_index))
-                    st.warning("Holding removed.")
-
-                with st.spinner("Building portfolio snapshot..."):
-                    portfolio_df = build_portfolio_snapshot(st.session_state.portfolio)
-
-                if portfolio_df.empty:
-                    st.warning("Portfolio data could not be built.")
-                else:
-                    total_invested = float(portfolio_df["Invested"].sum())
-                    total_value = float(portfolio_df["Current Value"].sum())
-                    total_pnl = float(portfolio_df["P/L"].sum())
-                    total_pnl_pct = (total_pnl / total_invested * 100) if total_invested else 0.0
-
-                    pf1, pf2, pf3, pf4 = st.columns(4)
-                    pf1.metric("Total Invested", f"₹ {fmt_num(total_invested)}")
-                    pf2.metric("Current Value", f"₹ {fmt_num(total_value)}")
-                    pf3.metric("Net P/L", f"₹ {fmt_num(total_pnl)}")
-                    pf4.metric("Net P/L %", f"{total_pnl_pct:.2f}%")
-
-                    st.dataframe(portfolio_df, use_container_width=True)
-
-                    fig_pf = go.Figure()
-                    fig_pf.add_trace(go.Bar(x=portfolio_df["Symbol"], y=portfolio_df["P/L"], name="P/L"))
-                    fig_pf.update_layout(title="Portfolio P/L by Holding", xaxis_title="Symbol", yaxis_title="P/L", height=420)
-                    st.plotly_chart(fig_pf, use_container_width=True)
-
-                    csv_pf = portfolio_df.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="Download Portfolio CSV",
-                        data=csv_pf,
-                        file_name="portfolio_snapshot.csv",
-                        mime="text/csv"
-                    )
+            portfolio_df = build_portfolio_snapshot(st.session_state.portfolio)
+            if portfolio_df.empty:
+                st.info("Portfolio data is not available right now.")
             else:
-                st.info("No portfolio holdings yet.")
+                total_invested = float(portfolio_df["Invested"].sum())
+                total_value = float(portfolio_df["Current Value"].sum())
+                total_pnl = total_value - total_invested
+                total_pnl_pct = (total_pnl / total_invested * 100) if total_invested else 0.0
 
-# st.caption("⚠️ This is an educational demo only. Not financial advice. Data from Yahoo Finance may be unreliable for some NSE/BSE symbols.")
+                pp1, pp2, pp3 = st.columns(3)
+                pp1.metric("Total Invested", f"₹ {fmt_num(total_invested)}")
+                pp2.metric("Current Value", f"₹ {fmt_num(total_value)}")
+                pp3.metric("Total P/L", f"₹ {fmt_num(total_pnl)}", f"{total_pnl_pct:.2f}%")
+                st.dataframe(portfolio_df, use_container_width=True)
+
+    except Exception as ex:
+        progress.empty()
+        loading_msg.empty()
+        st.error("Something went wrong while processing the app.")
+        st.code(str(ex))
+else:
+    st.info("Select a stock, then click 'Fetch Data & Predict' to load fresh analysis.")
