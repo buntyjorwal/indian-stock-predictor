@@ -14,7 +14,7 @@ st.markdown("**Real-time NSE/BSE data + Simple Prophet Prediction**")
 st.sidebar.header("Stock Selection")
 symbol_input = st.sidebar.text_input("Enter Stock Symbol", value="RELIANCE.NS").strip().upper()
 
-if symbol_input == "^NSEI":
+if "NIFTY" in symbol_input or symbol_input == "NSEI":
     symbol = "^NSEI"
 elif not symbol_input.endswith((".NS", ".BO")):
     symbol = symbol_input + ".NS"
@@ -24,82 +24,47 @@ else:
 days = st.sidebar.slider("Days to Predict", min_value=7, max_value=60, value=15)
 
 if st.sidebar.button("Fetch Data & Predict", type="primary"):
-    with st.spinner(f"Fetching data for **{symbol}** (this may take 10-20 seconds)..."):
+    with st.spinner(f"Fetching data for **{symbol}**... (may take 15-30 seconds due to yfinance limits)"):
         data = pd.DataFrame()
         
-        # Retry logic
-        for attempt in range(4):
+        for attempt in range(5):
             try:
-                data = yf.download(symbol, period="2y", interval="1d", 
-                                 progress=False, timeout=30, auto_adjust=True)
-                if not data.empty:
+                data = yf.download(symbol, period="2y", interval="1d", progress=False, timeout=40, auto_adjust=True)
+                if len(data) > 20:   # at least some data
                     break
             except:
                 pass
-            time.sleep(3)
+            time.sleep(4)
         
-        # Fallback to 1 year if 2y fails
-        if data.empty:
-            try:
-                data = yf.download(symbol, period="1y", interval="1d", 
-                                 progress=False, auto_adjust=True)
-            except:
-                pass
-
-        if data.empty:
-            st.error(f"❌ Sorry, could not fetch data for **{symbol}** right now.")
-            st.info("**Suggested symbols to try:**")
-            st.info("• RELIANCE.NS\n• HDFCBANK.NS\n• TCS.NS\n• INFY.NS\n• SBIN.NS\n• ^NSEI (Nifty 50)")
-            st.info("💡 yfinance sometimes has temporary issues with Indian stocks on cloud. Try again in a few minutes or refresh the page.")
+        if len(data) < 20:
+            st.error(f"❌ Could not fetch enough data for **{symbol}** right now.")
+            st.info("**Why?** yfinance often has temporary blocks for Indian stocks on cloud servers.")
+            st.info("**Try these exact symbols:** RELIANCE.NS, HDFCBANK.NS, TCS.NS, INFY.NS, SBIN.NS, ^NSEI")
+            st.info("💡 Refresh the page after 1-2 minutes or try on your local laptop (streamlit run app.py)")
         else:
-            # Safe price extraction
-            try:
-                current_price = float(data['Close'].iloc[-1])
-            except:
-                current_price = float(data['Close'].mean())  # fallback
-
-            st.success(f"✅ Successfully loaded **{symbol}**")
+            current_price = float(data['Close'].iloc[-1])
+            st.success(f"✅ Data loaded for **{symbol}**")
             st.metric("Current Price", f"₹ {current_price:,.2f}")
 
-            # Candlestick Chart
-            fig = go.Figure(data=[go.Candlestick(
-                x=data.index,
-                open=data['Open'],
-                high=data['High'],
-                low=data['Low'],
-                close=data['Close']
-            )])
-            fig.update_layout(title=f"{symbol} - Historical Price", xaxis_title="Date", yaxis_title="Price (₹)")
+            # Charts and prediction (same as before)
+            fig = go.Figure(data=[go.Candlestick(x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'])])
+            fig.update_layout(title=f"{symbol} Price History", xaxis_title="Date", yaxis_title="Price (₹)")
             st.plotly_chart(fig, use_container_width=True)
 
-            # Prophet Prediction
             st.subheader(f"📈 Prediction for Next {days} Days")
-            df_prophet = data[['Close']].reset_index()
-            df_prophet.columns = ['ds', 'y']
+            df = data[['Close']].reset_index()
+            df.columns = ['ds', 'y']
 
-            try:
-                model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
-                model.fit(df_prophet)
+            model = Prophet(yearly_seasonality=True, weekly_seasonality=True)
+            model.fit(df)
+            future = model.make_future_dataframe(periods=days)
+            forecast = model.predict(future)
 
-                future = model.make_future_dataframe(periods=days)
-                forecast = model.predict(future)
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name="Predicted", line=dict(color="#00ff88")))
+            fig2.update_layout(title="Forecast", xaxis_title="Date", yaxis_title="Price (₹)")
+            st.plotly_chart(fig2, use_container_width=True)
 
-                fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], 
-                                        name="Predicted", line=dict(color="#00ff88", width=2)))
-                fig2.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], 
-                                        name="Lower Bound", line=dict(dash="dot")))
-                fig2.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], 
-                                        name="Upper Bound", line=dict(dash="dot")))
-                fig2.update_layout(title="Price Forecast", xaxis_title="Date", yaxis_title="Price (₹)")
-                st.plotly_chart(fig2, use_container_width=True)
+            st.dataframe(forecast[['ds', 'yhat']].tail(days).round(2).rename(columns={"ds":"Date", "yhat":"Predicted ₹"}), use_container_width=True)
 
-                # Table
-                pred_table = forecast[['ds', 'yhat']].tail(days).round(2)
-                pred_table = pred_table.rename(columns={"ds": "Date", "yhat": "Predicted Price (₹)"})
-                st.dataframe(pred_table, use_container_width=True)
-
-            except Exception as e:
-                st.error(f"Prediction failed: {str(e)}")
-
-st.caption("⚠️ Educational tool only • Not financial advice • Market data via Yahoo Finance")
+st.caption("⚠️ This is an educational demo only. Not financial advice. Data from Yahoo Finance (unreliable for .NS on cloud).")
