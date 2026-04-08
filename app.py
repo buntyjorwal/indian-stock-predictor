@@ -1,5 +1,6 @@
 import time
 import math
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -7,10 +8,10 @@ import yfinance as yf
 from prophet import Prophet
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Indian Stock Market Predictor Pro++", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Indian Stock Market Predictor Ultimate", page_icon="📈", layout="wide")
 
-st.title("📊 Indian Stock Market Predictor Pro++")
-st.markdown("**Real-time NSE/BSE data + Forecast + Technical Analysis + Signal Engine + Backtest + Fundamentals + Watchlist + Support/Resistance + Comparison Mode**")
+st.title("📊 Indian Stock Market Predictor Ultimate")
+st.markdown("**Forecast + Technical Analysis + Fundamentals + Watchlist + Comparison + News Sentiment + Portfolio Tracker**")
 
 
 # -----------------------------
@@ -18,6 +19,12 @@ st.markdown("**Real-time NSE/BSE data + Forecast + Technical Analysis + Signal E
 # -----------------------------
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = ["RELIANCE.NS", "HDFCBANK.NS", "TCS.NS", "INFY.NS"]
+
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = [
+        {"Symbol": "RELIANCE.NS", "Quantity": 10.0, "Buy Price": 2500.0},
+        {"Symbol": "HDFCBANK.NS", "Quantity": 5.0, "Buy Price": 1500.0},
+    ]
 
 
 # -----------------------------
@@ -381,6 +388,67 @@ def fetch_fundamentals(symbol: str) -> dict:
         return {}
 
 
+def simple_sentiment_score(text: str) -> tuple[str, int]:
+    positive_words = {
+        "gain", "gains", "surge", "surges", "up", "beat", "beats", "strong", "growth", "bullish",
+        "profit", "profits", "record", "expands", "expansion", "buy", "outperform", "positive",
+        "rise", "rises", "jump", "jumps", "higher", "improves", "improvement"
+    }
+    negative_words = {
+        "fall", "falls", "down", "miss", "misses", "weak", "loss", "losses", "bearish", "drop",
+        "drops", "lower", "cuts", "cut", "decline", "declines", "risk", "risks", "warning",
+        "lawsuit", "probe", "crash", "slump", "pressure"
+    }
+
+    text = (text or "").lower()
+    words = re.findall(r"[a-zA-Z]+", text)
+
+    pos = sum(1 for w in words if w in positive_words)
+    neg = sum(1 for w in words if w in negative_words)
+    score = pos - neg
+
+    if score > 0:
+        return "Positive", score
+    elif score < 0:
+        return "Negative", score
+    return "Neutral", score
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_news(symbol: str) -> pd.DataFrame:
+    try:
+        tk = yf.Ticker(symbol)
+        news_items = getattr(tk, "news", None)
+        if not news_items:
+            return pd.DataFrame()
+
+        rows = []
+        for item in news_items[:15]:
+            title = item.get("title", "")
+            publisher = item.get("publisher", "")
+            link = item.get("link", "")
+            provider_time = item.get("providerPublishTime", None)
+
+            published = pd.to_datetime(provider_time, unit="s", errors="coerce") if provider_time else pd.NaT
+            sentiment, score = simple_sentiment_score(title)
+
+            rows.append({
+                "Published": published,
+                "Title": title,
+                "Publisher": publisher,
+                "Sentiment": sentiment,
+                "SentimentScore": score,
+                "Link": link,
+            })
+
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df = df.sort_values("Published", ascending=False)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
 def format_large_number(x):
     if x is None or pd.isna(x):
         return "-"
@@ -410,6 +478,20 @@ def add_to_watchlist(symbol: str):
 def remove_from_watchlist(symbol: str):
     if symbol in st.session_state.watchlist:
         st.session_state.watchlist.remove(symbol)
+
+
+def add_portfolio_row(symbol: str, qty: float, buy_price: float):
+    symbol = normalize_symbol(symbol)
+    st.session_state.portfolio.append({
+        "Symbol": symbol,
+        "Quantity": float(qty),
+        "Buy Price": float(buy_price)
+    })
+
+
+def remove_portfolio_row(index: int):
+    if 0 <= index < len(st.session_state.portfolio):
+        st.session_state.portfolio.pop(index)
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -497,8 +579,8 @@ def build_comparison_snapshot(symbols: tuple, days: int) -> tuple[pd.DataFrame, 
                 "Forecast Move %": round(forecast_move_pct, 2) if pd.notna(forecast_move_pct) else None,
             })
 
-            base = float(d["Close"].iloc[-30]) if len(d) >= 30 else float(d["Close"].iloc[0])
             series = d["Close"].tail(60).copy()
+            base = float(series.iloc[0]) if len(series) > 0 else 1.0
             norm_series = (series / base) * 100
             norm_df[sym] = norm_series
 
@@ -507,6 +589,51 @@ def build_comparison_snapshot(symbols: tuple, days: int) -> tuple[pd.DataFrame, 
 
     norm_df = norm_df.sort_index()
     return pd.DataFrame(rows), norm_df
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def current_price_for_symbol(symbol: str):
+    try:
+        d = fetch_stock_data(symbol)
+        if d.empty:
+            return None
+        return float(d["Close"].iloc[-1])
+    except Exception:
+        return None
+
+
+def build_portfolio_snapshot(portfolio_rows: list) -> pd.DataFrame:
+    rows = []
+
+    for row in portfolio_rows:
+        try:
+            sym = normalize_symbol(row["Symbol"])
+            qty = float(row["Quantity"])
+            buy_price = float(row["Buy Price"])
+
+            current_price = current_price_for_symbol(sym)
+            if current_price is None:
+                continue
+
+            invested = qty * buy_price
+            current_value = qty * current_price
+            pnl = current_value - invested
+            pnl_pct = (pnl / invested * 100) if invested else 0.0
+
+            rows.append({
+                "Symbol": sym,
+                "Quantity": qty,
+                "Buy Price": round(buy_price, 2),
+                "Current Price": round(current_price, 2),
+                "Invested": round(invested, 2),
+                "Current Value": round(current_value, 2),
+                "P/L": round(pnl, 2),
+                "P/L %": round(pnl_pct, 2),
+            })
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
 
 
 # -----------------------------
@@ -606,6 +733,7 @@ if run_btn:
         risk_name, volatility = risk_level(data)
         levels = get_support_resistance(data)
         fundamentals = fetch_fundamentals(symbol) if show_fundamentals else {}
+        news_df = fetch_news(symbol)
 
         st.success(f"✅ Data loaded for **{symbol}**")
 
@@ -630,8 +758,8 @@ if run_btn:
             unsafe_allow_html=True
         )
 
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-            ["Overview", "Technical Analysis", "Forecast", "Backtest", "Fundamentals", "Watchlist", "Comparison"]
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
+            ["Overview", "Technical Analysis", "Forecast", "Backtest", "Fundamentals", "Watchlist", "Comparison", "News Sentiment", "Portfolio"]
         )
 
         with tab1:
@@ -666,19 +794,6 @@ if run_btn:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("🧾 Summary")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.write(f"**Current Price:** ₹ {fmt_num(current_price)}")
-                st.write(f"**52 Week High:** ₹ {fmt_num(high_52w)}")
-                st.write(f"**52 Week Low:** ₹ {fmt_num(low_52w)}")
-                st.write(f"**Volatility:** {volatility:.2f}% ({risk_name})")
-            with c2:
-                st.write(f"**Signal:** {signal['label']}")
-                st.write("**Why:**")
-                for reason in signal["reasons"]:
-                    st.write(f"- {reason}")
-
             st.subheader("🎯 Support / Resistance")
             sr1, sr2, sr3, sr4 = st.columns(4)
             sr1.metric("Nearest Support", f"₹ {fmt_num(levels['support'])}" if levels["support"] is not None else "-")
@@ -707,7 +822,6 @@ if run_btn:
                     fig_macd.update_layout(title="MACD", xaxis_title="Date", yaxis_title="Value", height=350)
                     st.plotly_chart(fig_macd, use_container_width=True)
 
-                st.subheader("📈 Bollinger Bands")
                 fig_bb = go.Figure()
                 fig_bb.add_trace(go.Scatter(x=data.index, y=data["Close"], mode="lines", name="Close"))
                 fig_bb.add_trace(go.Scatter(x=data.index, y=data["BB_Upper"], mode="lines", name="BB Upper"))
@@ -715,14 +829,6 @@ if run_btn:
                 fig_bb.add_trace(go.Scatter(x=data.index, y=data["BB_Lower"], mode="lines", name="BB Lower"))
                 fig_bb.update_layout(title="Bollinger Bands", xaxis_title="Date", yaxis_title="Price", height=420)
                 st.plotly_chart(fig_bb, use_container_width=True)
-
-                last = data.iloc[-1]
-                st.subheader("Technical Snapshot")
-                s1, s2, s3, s4 = st.columns(4)
-                s1.metric("RSI 14", fmt_num(last["RSI14"]))
-                s2.metric("MACD", fmt_num(last["MACD"]))
-                s3.metric("Signal Line", fmt_num(last["MACDSignal"]))
-                s4.metric("ATR 14", fmt_num(last["ATR14"]))
             else:
                 st.info("Technical indicators are hidden from sidebar settings.")
 
@@ -751,62 +857,16 @@ if run_btn:
 
                 fig2 = go.Figure()
                 fig2.add_trace(go.Scatter(x=hist_df["ds"], y=hist_df["y"], mode="lines", name="Historical"))
-
-                fig2.add_trace(
-                    go.Scatter(
-                        x=forecast["ds"],
-                        y=forecast["yhat_upper"],
-                        mode="lines",
-                        line=dict(width=0),
-                        showlegend=False,
-                        name="Upper Band"
-                    )
-                )
-                fig2.add_trace(
-                    go.Scatter(
-                        x=forecast["ds"],
-                        y=forecast["yhat_lower"],
-                        mode="lines",
-                        fill="tonexty",
-                        line=dict(width=0),
-                        name="Confidence Range"
-                    )
-                )
+                fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_upper"], mode="lines", line=dict(width=0), showlegend=False))
+                fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_lower"], mode="lines", fill="tonexty", line=dict(width=0), name="Confidence Range"))
                 fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat"], mode="lines", name="Predicted"))
-
-                if levels["support"] is not None:
-                    fig2.add_hline(y=levels["support"], annotation_text="Support", line_dash="dot")
-                if levels["resistance"] is not None:
-                    fig2.add_hline(y=levels["resistance"], annotation_text="Resistance", line_dash="dot")
-
-                fig2.update_layout(
-                    title="Historical + Forecast with Confidence Range",
-                    xaxis_title="Date",
-                    yaxis_title="Price",
-                    height=560
-                )
+                fig2.update_layout(title="Historical + Forecast", xaxis_title="Date", yaxis_title="Price", height=560)
                 st.plotly_chart(fig2, use_container_width=True)
 
-                st.subheader("📋 Next Days Forecast Table")
-                prediction_table = (
-                    future_rows.round(2).rename(
-                        columns={
-                            "ds": "Date",
-                            "yhat": "Predicted ₹",
-                            "yhat_lower": "Lower ₹",
-                            "yhat_upper": "Upper ₹"
-                        }
-                    )
+                prediction_table = future_rows.round(2).rename(
+                    columns={"ds": "Date", "yhat": "Predicted ₹", "yhat_lower": "Lower ₹", "yhat_upper": "Upper ₹"}
                 )
                 st.dataframe(prediction_table, use_container_width=True)
-
-                forecast_csv = prediction_table.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download Forecast CSV",
-                    data=forecast_csv,
-                    file_name=f"{symbol.replace('^', '')}_forecast.csv",
-                    mime="text/csv"
-                )
             except Exception as ex:
                 st.error("❌ Prediction part incomplete due to processing error.")
                 st.code(str(ex))
@@ -816,7 +876,6 @@ if run_btn:
 
             if show_backtest:
                 bt = simple_backtest(data, holdout_days=30)
-
                 if bt["ok"]:
                     b1, b2, b3 = st.columns(3)
                     b1.metric("MAE", f"{bt['mae']:.2f}")
@@ -824,27 +883,13 @@ if run_btn:
                     b3.metric("MAPE", f"{bt['mape']:.2f}%")
 
                     backtest_df = bt["actual_pred"].copy()
-
                     fig_bt = go.Figure()
                     fig_bt.add_trace(go.Scatter(x=backtest_df["ds"], y=backtest_df["y"], mode="lines", name="Actual"))
                     fig_bt.add_trace(go.Scatter(x=backtest_df["ds"], y=backtest_df["yhat"], mode="lines", name="Predicted"))
-                    fig_bt.update_layout(
-                        title="Backtest: Actual vs Predicted",
-                        xaxis_title="Date",
-                        yaxis_title="Price",
-                        height=450
-                    )
+                    fig_bt.update_layout(title="Backtest: Actual vs Predicted", xaxis_title="Date", yaxis_title="Price", height=450)
                     st.plotly_chart(fig_bt, use_container_width=True)
-
-                    if bt["mape"] <= 2:
-                        st.success("Backtest quality looks strong for recent data.")
-                    elif bt["mape"] <= 5:
-                        st.info("Backtest quality is reasonable for a simple model.")
-                    else:
-                        st.warning("Backtest error is high. Use forecast carefully.")
                 else:
-                    st.warning("Backtest unavailable.")
-                    st.write(bt["reason"])
+                    st.warning(bt["reason"])
             else:
                 st.info("Backtest is hidden from sidebar settings.")
 
@@ -871,15 +916,6 @@ if run_btn:
                 f7.metric("52W High", fmt_num(fundamentals.get("fiftyTwoWeekHigh")))
                 f8.metric("52W Low", fmt_num(fundamentals.get("fiftyTwoWeekLow")))
 
-                left, right = st.columns(2)
-                with left:
-                    st.write(f"**Sector:** {fundamentals.get('sector', '-') or '-'}")
-                    st.write(f"**Industry:** {fundamentals.get('industry', '-') or '-'}")
-                    st.write(f"**Currency:** {fundamentals.get('currency', '-') or '-'}")
-                with right:
-                    website = fundamentals.get("website", "")
-                    st.write(f"**Website:** {website if website else '-'}")
-
         with tab6:
             st.subheader("⭐ Watchlist Dashboard")
 
@@ -894,75 +930,112 @@ if run_btn:
                 else:
                     st.dataframe(wl_df, use_container_width=True)
 
-                    csv_data = wl_df.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="Download Watchlist CSV",
-                        data=csv_data,
-                        file_name="watchlist_snapshot.csv",
-                        mime="text/csv"
-                    )
-
         with tab7:
             st.subheader("⚖️ Compare 2–3 Stocks")
 
             if len(compare_symbols) < 2:
                 st.warning("Please enter at least 2 symbols in the sidebar for comparison.")
             else:
-                st.write("Comparing:", ", ".join(compare_symbols))
-
                 with st.spinner("Building comparison view..."):
                     cmp_df, norm_df = build_comparison_snapshot(tuple(compare_symbols), days)
 
                 if cmp_df.empty:
                     st.warning("Comparison data could not be loaded.")
                 else:
-                    st.subheader("Comparison Snapshot")
                     st.dataframe(cmp_df, use_container_width=True)
 
-                    st.subheader("Normalized Performance (Base = 100)")
                     fig_cmp = go.Figure()
                     for col in norm_df.columns:
                         fig_cmp.add_trace(go.Scatter(x=norm_df.index, y=norm_df[col], mode="lines", name=col))
-                    fig_cmp.update_layout(
-                        title="Last 60 Sessions Normalized Comparison",
-                        xaxis_title="Date",
-                        yaxis_title="Normalized Value",
-                        height=500
-                    )
+                    fig_cmp.update_layout(title="Normalized Performance", xaxis_title="Date", yaxis_title="Base = 100", height=500)
                     st.plotly_chart(fig_cmp, use_container_width=True)
 
-                    st.subheader("30D Return Comparison")
-                    bar_df = cmp_df[["Symbol", "30D Return %"]].dropna().copy()
-                    if not bar_df.empty:
-                        fig_bar = go.Figure()
-                        fig_bar.add_trace(go.Bar(x=bar_df["Symbol"], y=bar_df["30D Return %"], name="30D Return %"))
-                        fig_bar.update_layout(
-                            title="30 Day Return %",
-                            xaxis_title="Symbol",
-                            yaxis_title="Return %",
-                            height=420
-                        )
-                        st.plotly_chart(fig_bar, use_container_width=True)
+        with tab8:
+            st.subheader("📰 News Sentiment")
 
-                    st.subheader("Forecast End Price Comparison")
-                    fc_df = cmp_df[["Symbol", "Forecast End", "Forecast Move %"]].dropna().copy()
-                    if not fc_df.empty:
-                        fig_fc = go.Figure()
-                        fig_fc.add_trace(go.Bar(x=fc_df["Symbol"], y=fc_df["Forecast Move %"], name="Forecast Move %"))
-                        fig_fc.update_layout(
-                            title=f"Forecast Move % for Next {days} Days",
-                            xaxis_title="Symbol",
-                            yaxis_title="Forecast Move %",
-                            height=420
-                        )
-                        st.plotly_chart(fig_fc, use_container_width=True)
+            if news_df.empty:
+                st.warning("No recent news available for this symbol right now.")
+            else:
+                pos_count = int((news_df["Sentiment"] == "Positive").sum())
+                neg_count = int((news_df["Sentiment"] == "Negative").sum())
+                neu_count = int((news_df["Sentiment"] == "Neutral").sum())
+                avg_score = float(news_df["SentimentScore"].mean()) if not news_df.empty else 0.0
 
-                    csv_cmp = cmp_df.to_csv(index=False).encode("utf-8")
+                n1, n2, n3, n4 = st.columns(4)
+                n1.metric("Positive Headlines", pos_count)
+                n2.metric("Negative Headlines", neg_count)
+                n3.metric("Neutral Headlines", neu_count)
+                n4.metric("Avg Sentiment Score", f"{avg_score:.2f}")
+
+                overall = "Positive" if avg_score > 0 else "Negative" if avg_score < 0 else "Neutral"
+                st.info(f"Overall headline sentiment: {overall}")
+
+                display_df = news_df.copy()
+                display_df["Published"] = pd.to_datetime(display_df["Published"], errors="coerce")
+                display_df["Published"] = display_df["Published"].dt.strftime("%Y-%m-%d %H:%M")
+                st.dataframe(display_df[["Published", "Publisher", "Title", "Sentiment", "SentimentScore", "Link"]], use_container_width=True)
+
+        with tab9:
+            st.subheader("💼 Portfolio Tracker")
+
+            with st.expander("Add Holding", expanded=False):
+                pcol1, pcol2, pcol3, pcol4 = st.columns(4)
+                with pcol1:
+                    port_symbol = st.text_input("Portfolio Symbol", value="SBIN.NS")
+                with pcol2:
+                    port_qty = st.number_input("Quantity", min_value=0.0, value=1.0, step=1.0)
+                with pcol3:
+                    port_buy = st.number_input("Buy Price", min_value=0.0, value=100.0, step=1.0)
+                with pcol4:
+                    st.write("")
+                    st.write("")
+                    if st.button("Add Holding"):
+                        add_portfolio_row(port_symbol, port_qty, port_buy)
+                        st.success("Holding added.")
+
+            if st.session_state.portfolio:
+                raw_port_df = pd.DataFrame(st.session_state.portfolio)
+                raw_port_df.index = range(len(raw_port_df))
+                st.write("Current Holdings Input")
+                st.dataframe(raw_port_df, use_container_width=True)
+
+                remove_index = st.number_input("Remove holding index", min_value=0, max_value=max(0, len(st.session_state.portfolio) - 1), value=0, step=1)
+                if st.button("Remove Holding"):
+                    remove_portfolio_row(int(remove_index))
+                    st.warning("Holding removed.")
+
+                with st.spinner("Building portfolio snapshot..."):
+                    portfolio_df = build_portfolio_snapshot(st.session_state.portfolio)
+
+                if portfolio_df.empty:
+                    st.warning("Portfolio data could not be built.")
+                else:
+                    total_invested = float(portfolio_df["Invested"].sum())
+                    total_value = float(portfolio_df["Current Value"].sum())
+                    total_pnl = float(portfolio_df["P/L"].sum())
+                    total_pnl_pct = (total_pnl / total_invested * 100) if total_invested else 0.0
+
+                    pf1, pf2, pf3, pf4 = st.columns(4)
+                    pf1.metric("Total Invested", f"₹ {fmt_num(total_invested)}")
+                    pf2.metric("Current Value", f"₹ {fmt_num(total_value)}")
+                    pf3.metric("Net P/L", f"₹ {fmt_num(total_pnl)}")
+                    pf4.metric("Net P/L %", f"{total_pnl_pct:.2f}%")
+
+                    st.dataframe(portfolio_df, use_container_width=True)
+
+                    fig_pf = go.Figure()
+                    fig_pf.add_trace(go.Bar(x=portfolio_df["Symbol"], y=portfolio_df["P/L"], name="P/L"))
+                    fig_pf.update_layout(title="Portfolio P/L by Holding", xaxis_title="Symbol", yaxis_title="P/L", height=420)
+                    st.plotly_chart(fig_pf, use_container_width=True)
+
+                    csv_pf = portfolio_df.to_csv(index=False).encode("utf-8")
                     st.download_button(
-                        label="Download Comparison CSV",
-                        data=csv_cmp,
-                        file_name="comparison_snapshot.csv",
+                        label="Download Portfolio CSV",
+                        data=csv_pf,
+                        file_name="portfolio_snapshot.csv",
                         mime="text/csv"
                     )
+            else:
+                st.info("No portfolio holdings yet.")
 
 # st.caption("⚠️ This is an educational demo only. Not financial advice. Data from Yahoo Finance may be unreliable for some NSE/BSE symbols.")
