@@ -296,6 +296,10 @@ MIN_PRICE_ROWS = 3
 MIN_INDICATOR_ROWS = 20
 PREDICTION_MIN_ROWS = 50
 BACKTEST_MIN_ROWS = 120
+FORECAST_MIN_CLIP = 0.01
+FORECAST_CAP_SIGMA = 2.0
+FORECAST_CAP_MIN_PCT = 0.08
+FORECAST_CAP_MAX_PCT = 0.35
 
 
 @st.cache_data(show_spinner=False, ttl=900)
@@ -386,6 +390,65 @@ def add_indicators(data: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def sanitize_forecast(forecast: pd.DataFrame, hist_df: pd.DataFrame, days: int) -> tuple[pd.DataFrame, dict]:
+    fc = forecast.copy()
+    hist = hist_df.copy()
+
+    if hist.empty:
+        meta = {
+            "is_capped": False,
+            "cap_pct": None,
+            "floor_price": None,
+            "ceiling_price": None,
+            "annual_vol_pct": None,
+        }
+        return fc, meta
+
+    current_price = float(hist["y"].iloc[-1])
+    daily_ret = hist["y"].pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    ann_vol = float(daily_ret.std() * np.sqrt(252)) if not daily_ret.empty else 0.0
+    horizon_vol = ann_vol * np.sqrt(max(days, 1) / 252.0)
+    cap_pct = min(FORECAST_CAP_MAX_PCT, max(FORECAST_CAP_MIN_PCT, horizon_vol * FORECAST_CAP_SIGMA))
+
+    floor_price = max(FORECAST_MIN_CLIP, current_price * (1 - cap_pct))
+    ceiling_price = max(floor_price, current_price * (1 + cap_pct))
+
+    future_mask = fc["ds"] > hist["ds"].max()
+    if future_mask.any():
+        pre_clip = fc.loc[future_mask, ["yhat", "yhat_lower", "yhat_upper"]].copy()
+        fc.loc[future_mask, "yhat"] = fc.loc[future_mask, "yhat"].clip(lower=floor_price, upper=ceiling_price)
+        fc.loc[future_mask, "yhat_lower"] = fc.loc[future_mask, "yhat_lower"].clip(lower=floor_price, upper=ceiling_price)
+        fc.loc[future_mask, "yhat_upper"] = fc.loc[future_mask, "yhat_upper"].clip(lower=floor_price, upper=ceiling_price)
+        fc.loc[future_mask, "yhat_lower"] = np.minimum(fc.loc[future_mask, "yhat_lower"], fc.loc[future_mask, "yhat"])
+        fc.loc[future_mask, "yhat_upper"] = np.maximum(fc.loc[future_mask, "yhat_upper"], fc.loc[future_mask, "yhat"])
+        is_capped = not pre_clip.round(6).equals(fc.loc[future_mask, ["yhat", "yhat_lower", "yhat_upper"]].round(6))
+    else:
+        is_capped = False
+
+    meta = {
+        "is_capped": is_capped,
+        "cap_pct": cap_pct * 100,
+        "floor_price": floor_price,
+        "ceiling_price": ceiling_price,
+        "annual_vol_pct": ann_vol * 100,
+    }
+    return fc, meta
+
+
+def describe_forecast_reliability(current_price: float, final_pred: float, cap_meta: dict) -> tuple[str, str]:
+    if current_price <= 0:
+        return "Unknown", "Forecast reliability could not be assessed."
+
+    move_pct = abs((final_pred - current_price) / current_price) * 100
+    if cap_meta.get("is_capped"):
+        return "Low", "Forecast has been capped to a realistic range because the raw model output looked too extreme."
+    if move_pct >= 20:
+        return "Low", "Forecast implies a very large move, so treat it as a direction warning rather than an exact target."
+    if move_pct >= 10:
+        return "Moderate", "Forecast is usable as a rough directional estimate, but exact price targeting may be noisy."
+    return "Moderate-High", "Forecast range looks comparatively stable for the selected horizon."
+
+
 def build_forecast(data: pd.DataFrame, days: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = data[["Close"]].reset_index().copy()
     date_col = df.columns[0]
@@ -413,9 +476,11 @@ def build_forecast(data: pd.DataFrame, days: int) -> tuple[pd.DataFrame, pd.Data
     forecast = model.predict(future)
 
     for col in ["yhat", "yhat_lower", "yhat_upper"]:
-        forecast[col] = np.exp(forecast[col]).clip(lower=0.01)
+        forecast[col] = np.exp(forecast[col]).clip(lower=FORECAST_MIN_CLIP)
 
     hist_df = df[["ds", "y"]].copy()
+    forecast, cap_meta = sanitize_forecast(forecast, hist_df, days)
+    forecast.attrs["cap_meta"] = cap_meta
     return hist_df, forecast
 
 def simple_backtest(data: pd.DataFrame, holdout_days: int = 30) -> dict:
@@ -570,8 +635,9 @@ def get_support_resistance(df: pd.DataFrame) -> dict:
     }
 
 
-def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_tail: pd.DataFrame | None, risk_name: str, volatility: float, levels: dict) -> str:
+def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_tail: pd.DataFrame | None, risk_name: str, volatility: float, levels: dict, cap_meta: dict | None = None) -> str:
     move_text = "Forecast currently unavailable."
+    reliability_text = ""
     if forecast_tail is not None and not forecast_tail.empty:
         final_pred = float(forecast_tail["yhat"].iloc[-1])
         if final_pred > 0:
@@ -579,6 +645,11 @@ def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_t
             delta_pct = (delta / current_price * 100) if current_price else 0
             direction = "upside" if delta >= 0 else "downside"
             move_text = f"Model forecast suggests {abs(delta_pct):.2f}% {direction} over the selected horizon."
+            if cap_meta:
+                reliability, reliability_note = describe_forecast_reliability(current_price, final_pred, cap_meta)
+                reliability_text = f" Forecast reliability is {reliability}. {reliability_note}"
+                if cap_meta.get("is_capped"):
+                    move_text += f" A realistic forecast band was applied between ₹ {fmt_num(cap_meta.get('floor_price'))} and ₹ {fmt_num(cap_meta.get('ceiling_price'))}."
         else:
             move_text = "Forecast was suppressed because the raw output was not price-valid."
 
@@ -588,7 +659,7 @@ def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_t
 
     return (
         f"For {symbol}, the technical signal is {signal['label']} with {signal['confidence']}% confidence. "
-        f"Key drivers are: {reasons}. {move_text} Annualized volatility is {volatility:.2f}%, so risk is classified as {risk_name}. "
+        f"Key drivers are: {reasons}. {move_text}{reliability_text} Annualized volatility is {volatility:.2f}%, so risk is classified as {risk_name}. "
         f"{support_text}, and {resistance_text}. This is a model-assisted summary, not trading advice."
     )
 
@@ -963,7 +1034,7 @@ if run_btn:
             forecast_error = str(ex)
 
         if has_indicator_data:
-            ai_summary = build_ai_insight(symbol, current_price, signal, future_rows, risk_name, volatility, levels)
+            ai_summary = build_ai_insight(symbol, current_price, signal, future_rows, risk_name, volatility, levels, forecast.attrs.get("cap_meta", {}))
         else:
             ai_summary = f"For {symbol}, limited market history was available in this run, so full technical insight and forecast confidence may be restricted."
         progress.progress(100)
@@ -1074,13 +1145,21 @@ if run_btn:
                 trend = "Bullish 📈" if final_pred > current_price else "Bearish 📉"
                 expected_move = final_pred - current_price
                 expected_move_pct = (expected_move / current_price * 100) if current_price else 0
+                cap_meta = forecast.attrs.get("cap_meta", {}) if forecast is not None else {}
+                reliability, reliability_note = describe_forecast_reliability(current_price, final_pred, cap_meta)
+                status = "Capped & Sanitized ✅" if cap_meta.get("is_capped") else "Complete ✅"
 
                 p1, p2, p3, p4 = st.columns(4)
                 p1.metric("Predicted End Price", f"₹ {fmt_num(final_pred)}")
                 p2.metric("Expected Move", f"₹ {expected_move:,.2f}", f"{expected_move_pct:,.2f}%")
                 p3.metric("Range Low", f"₹ {fmt_num(final_lower)}")
                 p4.metric("Range High", f"₹ {fmt_num(final_upper)}")
-                st.info(f"Prediction Status: Complete ✅ | Trend Outlook: {trend}")
+                st.info(f"Prediction Status: {status} | Trend Outlook: {trend} | Reliability: {reliability}")
+                st.caption(reliability_note)
+                if cap_meta.get("is_capped"):
+                    st.warning(
+                        f"Raw model output looked too extreme for this horizon, so the forecast was clipped into a realistic band of ₹ {fmt_num(cap_meta.get('floor_price'))} to ₹ {fmt_num(cap_meta.get('ceiling_price'))}."
+                    )
 
                 fig2 = go.Figure()
                 fig2.add_trace(go.Scatter(x=hist_df["ds"], y=hist_df["y"], mode="lines", name="Historical"))
