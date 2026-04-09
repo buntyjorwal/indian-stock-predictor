@@ -393,9 +393,13 @@ def build_forecast(data: pd.DataFrame, days: int) -> tuple[pd.DataFrame, pd.Data
     df["ds"] = pd.to_datetime(df["ds"])
     df["y"] = pd.to_numeric(df["y"], errors="coerce")
     df = df.dropna(subset=["ds", "y"]).copy()
+    df = df[df["y"] > 0].copy()
 
     if len(df) < PREDICTION_MIN_ROWS:
         raise ValueError("Not enough clean data for prediction.")
+
+    log_df = df.copy()
+    log_df["y"] = np.log(log_df["y"])
 
     model = Prophet(
         daily_seasonality=False,
@@ -403,12 +407,16 @@ def build_forecast(data: pd.DataFrame, days: int) -> tuple[pd.DataFrame, pd.Data
         yearly_seasonality=True,
         changepoint_prior_scale=0.15,
     )
-    model.fit(df)
+    model.fit(log_df)
 
     future = model.make_future_dataframe(periods=days)
     forecast = model.predict(future)
-    return df, forecast
 
+    for col in ["yhat", "yhat_lower", "yhat_upper"]:
+        forecast[col] = np.exp(forecast[col]).clip(lower=0.01)
+
+    hist_df = df[["ds", "y"]].copy()
+    return hist_df, forecast
 
 def simple_backtest(data: pd.DataFrame, holdout_days: int = 30) -> dict:
     df = data[["Close"]].reset_index().copy()
@@ -566,10 +574,13 @@ def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_t
     move_text = "Forecast currently unavailable."
     if forecast_tail is not None and not forecast_tail.empty:
         final_pred = float(forecast_tail["yhat"].iloc[-1])
-        delta = final_pred - current_price
-        delta_pct = (delta / current_price * 100) if current_price else 0
-        direction = "upside" if delta >= 0 else "downside"
-        move_text = f"Model forecast suggests {abs(delta_pct):.2f}% {direction} over the selected horizon."
+        if final_pred > 0:
+            delta = final_pred - current_price
+            delta_pct = (delta / current_price * 100) if current_price else 0
+            direction = "upside" if delta >= 0 else "downside"
+            move_text = f"Model forecast suggests {abs(delta_pct):.2f}% {direction} over the selected horizon."
+        else:
+            move_text = "Forecast was suppressed because the raw output was not price-valid."
 
     reasons = ", ".join(signal["reasons"][:4]) if signal["reasons"] else "limited technical confirmation"
     support_text = f"Nearest support is ₹ {fmt_num(levels['support'])}" if levels["support"] is not None else "Support level is not clearly identified"
