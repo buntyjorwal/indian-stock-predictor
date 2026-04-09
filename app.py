@@ -292,39 +292,25 @@ def fetch_from_nselib(symbol: str) -> pd.DataFrame:
     return df
 
 
-DISPLAY_MIN_ROWS = 20
-PREDICTION_MIN_ROWS = 50
-BACKTEST_MIN_ROWS = 120
-
-
 @st.cache_data(show_spinner=False, ttl=900)
 def fetch_stock_data(symbol: str) -> tuple[pd.DataFrame, str, str]:
     last_error = None
 
-    symbols_to_try = [symbol]
-    if symbol.endswith(".NS"):
-        symbols_to_try.append(symbol.replace(".NS", ".BO"))
-    elif symbol.endswith(".BO"):
-        symbols_to_try.append(symbol.replace(".BO", ".NS"))
-
-    for sym in symbols_to_try:
-        for _ in range(2):
-            try:
-                yf_df = fetch_from_yfinance(sym)
-                if len(yf_df) >= DISPLAY_MIN_ROWS:
-                    note = f"Primary source loaded successfully for {sym}."
-                    return yf_df, "yfinance", note
-            except Exception as ex:
-                last_error = ex
-            time.sleep(1)
-
+    for _ in range(2):
         try:
-            nse_df = fetch_from_nselib(sym)
-            if len(nse_df) >= DISPLAY_MIN_ROWS:
-                note = f"Fallback source used for {sym} because yfinance was unavailable or incomplete."
-                return nse_df, "nselib", note
+            yf_df = fetch_from_yfinance(symbol)
+            if len(yf_df) >= 50:
+                return yf_df, "yfinance", "Primary source loaded successfully."
         except Exception as ex:
             last_error = ex
+        time.sleep(1)
+
+    try:
+        nse_df = fetch_from_nselib(symbol)
+        if len(nse_df) >= 50:
+            return nse_df, "nselib", "Fallback source used because yfinance was unavailable or incomplete."
+    except Exception as ex:
+        last_error = ex
 
     if last_error:
         raise last_error
@@ -380,7 +366,7 @@ def build_forecast(data: pd.DataFrame, days: int) -> tuple[pd.DataFrame, pd.Data
     df["y"] = pd.to_numeric(df["y"], errors="coerce")
     df = df.dropna(subset=["ds", "y"]).copy()
 
-    if len(df) < PREDICTION_MIN_ROWS:
+    if len(df) < 50:
         raise ValueError("Not enough clean data for prediction.")
 
     model = Prophet(
@@ -404,7 +390,7 @@ def simple_backtest(data: pd.DataFrame, holdout_days: int = 30) -> dict:
     df["y"] = pd.to_numeric(df["y"], errors="coerce")
     df = df.dropna().copy()
 
-    if len(df) < BACKTEST_MIN_ROWS:
+    if len(df) < 120:
         return {"ok": False, "reason": "Not enough data for backtest."}
 
     holdout_days = min(holdout_days, max(7, len(df) // 5))
@@ -552,10 +538,13 @@ def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_t
     move_text = "Forecast currently unavailable."
     if forecast_tail is not None and not forecast_tail.empty:
         final_pred = float(forecast_tail["yhat"].iloc[-1])
-        delta = final_pred - current_price
-        delta_pct = (delta / current_price * 100) if current_price else 0
-        direction = "upside" if delta >= 0 else "downside"
-        move_text = f"Model forecast suggests {abs(delta_pct):.2f}% {direction} over the selected horizon."
+        if final_pred > 0:
+            delta = final_pred - current_price
+            delta_pct = (delta / current_price * 100) if current_price else 0
+            direction = "upside" if delta >= 0 else "downside"
+            move_text = f"Model forecast suggests {abs(delta_pct):.2f}% {direction} over the selected horizon."
+        else:
+            move_text = "Forecast was suppressed because the raw model output was not price-valid."
 
     reasons = ", ".join(signal["reasons"][:4]) if signal["reasons"] else "limited technical confirmation"
     support_text = f"Nearest support is ₹ {fmt_num(levels['support'])}" if levels["support"] is not None else "Support level is not clearly identified"
@@ -711,7 +700,7 @@ def build_comparison_snapshot(symbols: tuple, days: int) -> tuple[pd.DataFrame, 
     for sym in symbols:
         try:
             d, _, _ = fetch_stock_data(sym)
-            if d.empty or len(d) < DISPLAY_MIN_ROWS:
+            if d.empty or len(d) < 50:
                 continue
             d = add_indicators(d)
             close = float(d["Close"].iloc[-1])
@@ -887,7 +876,7 @@ if run_btn:
         st.session_state.last_fetch_note = source_note
         progress.progress(45)
 
-        if raw_data.empty or len(raw_data) < DISPLAY_MIN_ROWS:
+        if raw_data.empty or len(raw_data) < 50:
             progress.empty()
             loading_msg.empty()
             st.error(f"Could not fetch enough usable data for {symbol}.")
@@ -918,11 +907,8 @@ if run_btn:
         forecast = None
         future_rows = None
         try:
-            if len(data) >= PREDICTION_MIN_ROWS:
-                hist_df, forecast = build_forecast(data, days)
-                future_rows = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(days).copy()
-            else:
-                forecast_error = "Not enough historical data for prediction. Showing live analysis only."
+            hist_df, forecast = build_forecast(data, days)
+            future_rows = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(days).copy()
         except Exception as ex:
             forecast_error = str(ex)
 
@@ -1030,23 +1016,28 @@ if run_btn:
                 expected_move = final_pred - current_price
                 expected_move_pct = (expected_move / current_price * 100) if current_price else 0
 
-                p1, p2, p3, p4 = st.columns(4)
-                p1.metric("Predicted End Price", f"₹ {fmt_num(final_pred)}")
-                p2.metric("Expected Move", f"₹ {expected_move:,.2f}", f"{expected_move_pct:,.2f}%")
-                p3.metric("Range Low", f"₹ {fmt_num(final_lower)}")
-                p4.metric("Range High", f"₹ {fmt_num(final_upper)}")
-                st.info(f"Prediction Status: Complete ✅ | Trend Outlook: {trend}")
+                if final_pred <= 0 or final_lower <= 0 or final_upper <= 0:
+                    st.error("Forecast looks invalid for this stock. Negative or zero prices are not allowed, so prediction has been suppressed.")
+                    if forecast_error:
+                        st.code(forecast_error)
+                else:
+                    p1, p2, p3, p4 = st.columns(4)
+                    p1.metric("Predicted End Price", f"₹ {fmt_num(final_pred)}")
+                    p2.metric("Expected Move", f"₹ {expected_move:,.2f}", f"{expected_move_pct:,.2f}%")
+                    p3.metric("Range Low", f"₹ {fmt_num(final_lower)}")
+                    p4.metric("Range High", f"₹ {fmt_num(final_upper)}")
+                    st.info(f"Prediction Status: Complete ✅ | Trend Outlook: {trend}")
 
-                fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(x=hist_df["ds"], y=hist_df["y"], mode="lines", name="Historical"))
-                fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_upper"], mode="lines", line=dict(width=0), showlegend=False))
-                fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_lower"], mode="lines", fill="tonexty", line=dict(width=0), name="Confidence Range"))
-                fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat"], mode="lines", name="Predicted"))
-                fig2.update_layout(title="Historical + Forecast", xaxis_title="Date", yaxis_title="Price", height=560)
-                st.plotly_chart(fig2, use_container_width=True)
+                    fig2 = go.Figure()
+                    fig2.add_trace(go.Scatter(x=hist_df["ds"], y=hist_df["y"], mode="lines", name="Historical"))
+                    fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_upper"], mode="lines", line=dict(width=0), showlegend=False))
+                    fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_lower"], mode="lines", fill="tonexty", line=dict(width=0), name="Confidence Range"))
+                    fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat"], mode="lines", name="Predicted"))
+                    fig2.update_layout(title="Historical + Forecast", xaxis_title="Date", yaxis_title="Price", height=560)
+                    st.plotly_chart(fig2, use_container_width=True)
 
-                prediction_table = future_rows.round(2).rename(columns={"ds": "Date", "yhat": "Predicted ₹", "yhat_lower": "Lower ₹", "yhat_upper": "Upper ₹"})
-                st.dataframe(prediction_table, use_container_width=True)
+                    prediction_table = future_rows.round(2).rename(columns={"ds": "Date", "yhat": "Predicted ₹", "yhat_lower": "Lower ₹", "yhat_upper": "Upper ₹"})
+                    st.dataframe(prediction_table, use_container_width=True)
 
         with tab4:
             st.subheader("🧪 Backtest Accuracy")
