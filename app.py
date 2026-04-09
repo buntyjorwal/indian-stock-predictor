@@ -292,25 +292,53 @@ def fetch_from_nselib(symbol: str) -> pd.DataFrame:
     return df
 
 
+MIN_PRICE_ROWS = 3
+MIN_INDICATOR_ROWS = 20
+PREDICTION_MIN_ROWS = 50
+BACKTEST_MIN_ROWS = 120
+
+
 @st.cache_data(show_spinner=False, ttl=900)
 def fetch_stock_data(symbol: str) -> tuple[pd.DataFrame, str, str]:
     last_error = None
 
-    for _ in range(2):
+    symbols_to_try = [symbol]
+    if symbol.endswith(".NS"):
+        symbols_to_try.append(symbol.replace(".NS", ".BO"))
+    elif symbol.endswith(".BO"):
+        symbols_to_try.append(symbol.replace(".BO", ".NS"))
+
+    best_df = pd.DataFrame()
+    best_source = "none"
+    best_note = "No market data returned from available sources."
+
+    for sym in symbols_to_try:
+        for _ in range(2):
+            try:
+                yf_df = fetch_from_yfinance(sym)
+                if len(yf_df) > len(best_df):
+                    best_df = yf_df.copy()
+                    best_source = "yfinance"
+                    best_note = f"Primary source loaded for {sym}."
+                if len(yf_df) >= MIN_PRICE_ROWS:
+                    return yf_df, "yfinance", f"Primary source loaded successfully for {sym}."
+            except Exception as ex:
+                last_error = ex
+            time.sleep(1)
+
         try:
-            yf_df = fetch_from_yfinance(symbol)
-            if len(yf_df) >= 50:
-                return yf_df, "yfinance", "Primary source loaded successfully."
+            nse_df = fetch_from_nselib(sym)
+            if len(nse_df) > len(best_df):
+                best_df = nse_df.copy()
+                best_source = "nselib"
+                best_note = f"Fallback source loaded for {sym}."
+            if len(nse_df) >= MIN_PRICE_ROWS:
+                return nse_df, "nselib", f"Fallback source used for {sym} because yfinance was unavailable or incomplete."
         except Exception as ex:
             last_error = ex
-        time.sleep(1)
 
-    try:
-        nse_df = fetch_from_nselib(symbol)
-        if len(nse_df) >= 50:
-            return nse_df, "nselib", "Fallback source used because yfinance was unavailable or incomplete."
-    except Exception as ex:
-        last_error = ex
+    if not best_df.empty:
+        return best_df, best_source, best_note
 
     if last_error:
         raise last_error
@@ -366,7 +394,7 @@ def build_forecast(data: pd.DataFrame, days: int) -> tuple[pd.DataFrame, pd.Data
     df["y"] = pd.to_numeric(df["y"], errors="coerce")
     df = df.dropna(subset=["ds", "y"]).copy()
 
-    if len(df) < 50:
+    if len(df) < PREDICTION_MIN_ROWS:
         raise ValueError("Not enough clean data for prediction.")
 
     model = Prophet(
@@ -390,7 +418,7 @@ def simple_backtest(data: pd.DataFrame, holdout_days: int = 30) -> dict:
     df["y"] = pd.to_numeric(df["y"], errors="coerce")
     df = df.dropna().copy()
 
-    if len(df) < 120:
+    if len(df) < BACKTEST_MIN_ROWS:
         return {"ok": False, "reason": "Not enough data for backtest."}
 
     holdout_days = min(holdout_days, max(7, len(df) // 5))
@@ -538,13 +566,10 @@ def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_t
     move_text = "Forecast currently unavailable."
     if forecast_tail is not None and not forecast_tail.empty:
         final_pred = float(forecast_tail["yhat"].iloc[-1])
-        if final_pred > 0:
-            delta = final_pred - current_price
-            delta_pct = (delta / current_price * 100) if current_price else 0
-            direction = "upside" if delta >= 0 else "downside"
-            move_text = f"Model forecast suggests {abs(delta_pct):.2f}% {direction} over the selected horizon."
-        else:
-            move_text = "Forecast was suppressed because the raw model output was not price-valid."
+        delta = final_pred - current_price
+        delta_pct = (delta / current_price * 100) if current_price else 0
+        direction = "upside" if delta >= 0 else "downside"
+        move_text = f"Model forecast suggests {abs(delta_pct):.2f}% {direction} over the selected horizon."
 
     reasons = ", ".join(signal["reasons"][:4]) if signal["reasons"] else "limited technical confirmation"
     support_text = f"Nearest support is ₹ {fmt_num(levels['support'])}" if levels["support"] is not None else "Support level is not clearly identified"
@@ -700,7 +725,7 @@ def build_comparison_snapshot(symbols: tuple, days: int) -> tuple[pd.DataFrame, 
     for sym in symbols:
         try:
             d, _, _ = fetch_stock_data(sym)
-            if d.empty or len(d) < 50:
+            if d.empty or len(d) < MIN_PRICE_ROWS:
                 continue
             d = add_indicators(d)
             close = float(d["Close"].iloc[-1])
@@ -876,26 +901,40 @@ if run_btn:
         st.session_state.last_fetch_note = source_note
         progress.progress(45)
 
-        if raw_data.empty or len(raw_data) < 50:
+        if raw_data.empty or len(raw_data) < MIN_PRICE_ROWS:
             progress.empty()
             loading_msg.empty()
             st.error(f"Could not fetch enough usable data for {symbol}.")
-            st.info("Try symbols like RELIANCE.NS, HDFCBANK.NS, TCS.NS, INFY.NS, SBIN.NS, ITC.NS or ^NSEI.")
+            st.info("Try symbols like SPICEJET.BO, RELIANCE.NS, HDFCBANK.NS, TCS.NS, INFY.NS, SBIN.NS, ITC.NS or ^NSEI.")
             st.stop()
 
         loading_msg.info("Processing indicators, forecast, fundamentals, and news...")
-        data = add_indicators(raw_data)
+        data = raw_data.copy()
         close_series = pd.to_numeric(data["Close"], errors="coerce").dropna()
         current_price = float(close_series.iloc[-1])
         prev_price = float(close_series.iloc[-2]) if len(close_series) > 1 else current_price
         day_change = current_price - prev_price
         day_change_pct = (day_change / prev_price * 100) if prev_price else 0
-        high_52w = float(data["Close"].tail(252).max()) if len(data) >= 20 else current_price
-        low_52w = float(data["Close"].tail(252).min()) if len(data) >= 20 else current_price
+        high_52w = float(data["Close"].tail(252).max()) if len(data) >= MIN_INDICATOR_ROWS else current_price
+        low_52w = float(data["Close"].tail(252).min()) if len(data) >= MIN_INDICATOR_ROWS else current_price
         avg_volume = float(data["Volume"].tail(20).mean()) if data["Volume"].notna().any() else 0.0
-        signal = generate_signal(data)
-        risk_name, volatility = risk_level(data)
-        levels = get_support_resistance(data)
+
+        has_indicator_data = len(raw_data) >= MIN_INDICATOR_ROWS
+        if has_indicator_data:
+            data = add_indicators(raw_data)
+            signal = generate_signal(data)
+            risk_name, volatility = risk_level(data)
+            levels = get_support_resistance(data)
+        else:
+            signal = {
+                "label": "LIMITED DATA",
+                "score": 0,
+                "reasons": ["Not enough rows for full technical analysis"],
+                "color": "orange",
+                "confidence": 35,
+            }
+            risk_name, volatility = "Unknown", 0.0
+            levels = {"support": None, "resistance": None, "stop_loss": None, "breakout": None}
         progress.progress(70)
 
         fundamentals = fetch_fundamentals(symbol) if show_fundamentals else {}
@@ -912,7 +951,10 @@ if run_btn:
         except Exception as ex:
             forecast_error = str(ex)
 
-        ai_summary = build_ai_insight(symbol, current_price, signal, future_rows, risk_name, volatility, levels)
+        if has_indicator_data:
+            ai_summary = build_ai_insight(symbol, current_price, signal, future_rows, risk_name, volatility, levels)
+        else:
+            ai_summary = f"For {symbol}, limited market history was available in this run, so full technical insight and forecast confidence may be restricted."
         progress.progress(100)
         progress.empty()
         loading_msg.empty()
@@ -925,6 +967,8 @@ if run_btn:
         st.success(f"Data loaded for {symbol} using {source_label}.")
         if source_note:
             st.caption(source_note)
+        if not has_indicator_data:
+            st.warning("Limited market history received. Showing basic price analysis only.")
 
         m1, m2, m3, m4, m5, m6 = st.columns(6)
         m1.metric("Current Price", f"₹ {fmt_num(current_price)}", f"{day_change:,.2f}")
@@ -957,14 +1001,16 @@ if run_btn:
             st.subheader(f"📉 {symbol} Price Overview")
             fig = go.Figure()
             fig.add_trace(go.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"], name="Price"))
-            fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], mode="lines", name="SMA20"))
-            fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode="lines", name="SMA50"))
-            fig.add_trace(go.Scatter(x=data.index, y=data["SMA200"], mode="lines", name="SMA200"))
+            if has_indicator_data:
+                fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], mode="lines", name="SMA20"))
+                fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode="lines", name="SMA50"))
+                fig.add_trace(go.Scatter(x=data.index, y=data["SMA200"], mode="lines", name="SMA200"))
             if levels["support"] is not None:
                 fig.add_hline(y=levels["support"], annotation_text=f"Support {levels['support']}", line_dash="dot")
             if levels["resistance"] is not None:
                 fig.add_hline(y=levels["resistance"], annotation_text=f"Resistance {levels['resistance']}", line_dash="dot")
-            fig.update_layout(title=f"{symbol} Historical Price with Moving Averages", xaxis_title="Date", yaxis_title="Price", xaxis_rangeslider_visible=False, height=650)
+            title_suffix = "with Moving Averages" if has_indicator_data else "(Limited Data Mode)"
+            fig.update_layout(title=f"{symbol} Historical Price {title_suffix}", xaxis_title="Date", yaxis_title="Price", xaxis_rangeslider_visible=False, height=650)
             st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("🎯 Support / Resistance")
@@ -975,7 +1021,11 @@ if run_btn:
             sr4.metric("Breakout Zone", f"₹ {fmt_num(levels['breakout'])}" if levels["breakout"] is not None else "-")
 
         with tab2:
-            if show_technical:
+            if not show_technical:
+                st.info("Technical indicators are hidden from sidebar settings.")
+            elif not has_indicator_data:
+                st.warning("Technical indicators need at least 20 valid rows. Current run has limited market history.")
+            else:
                 st.subheader("📊 RSI & MACD")
                 t1, t2 = st.columns(2)
                 with t1:
@@ -999,8 +1049,6 @@ if run_btn:
                 fig_bb.add_trace(go.Scatter(x=data.index, y=data["BB_Lower"], mode="lines", name="BB Lower"))
                 fig_bb.update_layout(title="Bollinger Bands", xaxis_title="Date", yaxis_title="Price", height=420)
                 st.plotly_chart(fig_bb, use_container_width=True)
-            else:
-                st.info("Technical indicators are hidden from sidebar settings.")
 
         with tab3:
             st.subheader(f"📈 Prediction for Next {days} Days")
@@ -1016,28 +1064,23 @@ if run_btn:
                 expected_move = final_pred - current_price
                 expected_move_pct = (expected_move / current_price * 100) if current_price else 0
 
-                if final_pred <= 0 or final_lower <= 0 or final_upper <= 0:
-                    st.error("Forecast looks invalid for this stock. Negative or zero prices are not allowed, so prediction has been suppressed.")
-                    if forecast_error:
-                        st.code(forecast_error)
-                else:
-                    p1, p2, p3, p4 = st.columns(4)
-                    p1.metric("Predicted End Price", f"₹ {fmt_num(final_pred)}")
-                    p2.metric("Expected Move", f"₹ {expected_move:,.2f}", f"{expected_move_pct:,.2f}%")
-                    p3.metric("Range Low", f"₹ {fmt_num(final_lower)}")
-                    p4.metric("Range High", f"₹ {fmt_num(final_upper)}")
-                    st.info(f"Prediction Status: Complete ✅ | Trend Outlook: {trend}")
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("Predicted End Price", f"₹ {fmt_num(final_pred)}")
+                p2.metric("Expected Move", f"₹ {expected_move:,.2f}", f"{expected_move_pct:,.2f}%")
+                p3.metric("Range Low", f"₹ {fmt_num(final_lower)}")
+                p4.metric("Range High", f"₹ {fmt_num(final_upper)}")
+                st.info(f"Prediction Status: Complete ✅ | Trend Outlook: {trend}")
 
-                    fig2 = go.Figure()
-                    fig2.add_trace(go.Scatter(x=hist_df["ds"], y=hist_df["y"], mode="lines", name="Historical"))
-                    fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_upper"], mode="lines", line=dict(width=0), showlegend=False))
-                    fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_lower"], mode="lines", fill="tonexty", line=dict(width=0), name="Confidence Range"))
-                    fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat"], mode="lines", name="Predicted"))
-                    fig2.update_layout(title="Historical + Forecast", xaxis_title="Date", yaxis_title="Price", height=560)
-                    st.plotly_chart(fig2, use_container_width=True)
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(x=hist_df["ds"], y=hist_df["y"], mode="lines", name="Historical"))
+                fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_upper"], mode="lines", line=dict(width=0), showlegend=False))
+                fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_lower"], mode="lines", fill="tonexty", line=dict(width=0), name="Confidence Range"))
+                fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat"], mode="lines", name="Predicted"))
+                fig2.update_layout(title="Historical + Forecast", xaxis_title="Date", yaxis_title="Price", height=560)
+                st.plotly_chart(fig2, use_container_width=True)
 
-                    prediction_table = future_rows.round(2).rename(columns={"ds": "Date", "yhat": "Predicted ₹", "yhat_lower": "Lower ₹", "yhat_upper": "Upper ₹"})
-                    st.dataframe(prediction_table, use_container_width=True)
+                prediction_table = future_rows.round(2).rename(columns={"ds": "Date", "yhat": "Predicted ₹", "yhat_lower": "Lower ₹", "yhat_upper": "Upper ₹"})
+                st.dataframe(prediction_table, use_container_width=True)
 
         with tab4:
             st.subheader("🧪 Backtest Accuracy")
