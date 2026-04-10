@@ -501,6 +501,24 @@ def sanitize_single_prediction(pred_value: float, current_price: float, hist_pri
     return float(np.clip(pred_value, floor_price, ceiling_price))
 
 
+def classify_prediction_result(pred_price: float, actual_price: float, prev_close: float) -> tuple[str, str]:
+    pred_move = float(pred_price) - float(prev_close)
+    actual_move = float(actual_price) - float(prev_close)
+
+    direction_match = (
+        (abs(pred_move) < 1e-9 and abs(actual_move) < 1e-9)
+        or (pred_move > 0 and actual_move > 0)
+        or (pred_move < 0 and actual_move < 0)
+    )
+    abs_error_pct = (abs(actual_price - pred_price) / actual_price * 100) if actual_price else np.nan
+
+    if direction_match and pd.notna(abs_error_pct) and abs_error_pct <= 1.5:
+        return "Strong True", "green"
+    if direction_match and pd.notna(abs_error_pct) and abs_error_pct <= 4.0:
+        return "Near True", "green"
+    return "False", "red"
+
+
 def build_past_prediction_review(data: pd.DataFrame, days: int) -> pd.DataFrame:
     df = data[["Close"]].reset_index().copy()
     date_col = df.columns[0]
@@ -556,20 +574,10 @@ def build_past_prediction_review(data: pd.DataFrame, days: int) -> pd.DataFrame:
 
             actual_price = float(target_row["y"])
             prev_close = float(prev_row["y"])
-
-            pred_move = pred_price - prev_close
-            actual_move = actual_price - prev_close
-
-            if abs(actual_move) < 1e-9 and abs(pred_move) < 1e-9:
-                verdict = "TRUE"
-            elif pred_move == 0:
-                verdict = "FALSE"
-            elif (pred_move > 0 and actual_move > 0) or (pred_move < 0 and actual_move < 0):
-                verdict = "TRUE"
-            else:
-                verdict = "FALSE"
-
+            pred_move_pct = ((pred_price - prev_close) / prev_close * 100) if prev_close else np.nan
+            actual_move_pct = ((actual_price - prev_close) / prev_close * 100) if prev_close else np.nan
             abs_error_pct = (abs(actual_price - pred_price) / actual_price * 100) if actual_price else np.nan
+            result, result_color = classify_prediction_result(pred_price, actual_price, prev_close)
 
             rows.append(
                 {
@@ -579,10 +587,12 @@ def build_past_prediction_review(data: pd.DataFrame, days: int) -> pd.DataFrame:
                     "Lower ₹": pred_low,
                     "Upper ₹": pred_high,
                     "Actual ₹": actual_price,
-                    "Predicted Move %": ((pred_price - prev_close) / prev_close * 100) if prev_close else np.nan,
-                    "Actual Move %": ((actual_price - prev_close) / prev_close * 100) if prev_close else np.nan,
+                    "Predicted Move %": pred_move_pct,
+                    "Actual Move %": actual_move_pct,
                     "Error %": abs_error_pct,
-                    "Result": verdict,
+                    "Direction Match": "Yes" if ((pred_move_pct == 0 and actual_move_pct == 0) or (pred_move_pct > 0 and actual_move_pct > 0) or (pred_move_pct < 0 and actual_move_pct < 0)) else "No",
+                    "Result": result,
+                    "ResultColor": result_color,
                     "Type": "Past Review",
                 }
             )
@@ -597,15 +607,30 @@ def style_prediction_review(df: pd.DataFrame):
         return df
 
     def color_result(val):
-        if str(val).upper() == "TRUE":
+        key = str(val).strip().lower()
+        if key == "strong true":
+            return "background-color:#bbf7d0;color:#14532d;font-weight:700;"
+        if key == "near true":
             return "background-color:#dcfce7;color:#166534;font-weight:700;"
-        if str(val).upper() == "FALSE":
+        if key == "false":
             return "background-color:#fee2e2;color:#991b1b;font-weight:700;"
         return ""
+
+    def color_error(val):
+        try:
+            val = float(val)
+        except Exception:
+            return ""
+        if val <= 1.5:
+            return "background-color:#bbf7d0;color:#14532d;font-weight:700;"
+        if val <= 4.0:
+            return "background-color:#fef3c7;color:#92400e;font-weight:700;"
+        return "background-color:#fee2e2;color:#991b1b;font-weight:700;"
 
     return (
         df.style
         .map(color_result, subset=["Result"])
+        .map(color_error, subset=["Error %"])
         .format(
             {
                 "Previous Close ₹": "{:,.2f}",
