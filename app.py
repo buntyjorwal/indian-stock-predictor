@@ -1405,14 +1405,22 @@ if run_btn:
 
                 st.markdown("### Past Prediction Review")
                 if not past_review_df.empty:
-                    true_count = int((past_review_df["Result"] == "TRUE").sum())
-                    false_count = int((past_review_df["Result"] == "FALSE").sum())
-                    accuracy_pct = (true_count / len(past_review_df) * 100) if len(past_review_df) else 0
+                    strong_true_count = int((past_review_df["Result"] == "Strong True").sum())
+                    near_true_count = int((past_review_df["Result"] == "Near True").sum())
+                    false_count = int((past_review_df["Result"] == "False").sum())
+                    true_like_count = strong_true_count + near_true_count
+                    accuracy_pct = (true_like_count / len(past_review_df) * 100) if len(past_review_df) else 0
+                    avg_error_pct = float(pd.to_numeric(past_review_df["Error %"], errors="coerce").dropna().mean()) if "Error %" in past_review_df.columns else float("nan")
 
-                    r1, r2, r3 = st.columns(3)
+                    r1, r2, r3, r4, r5 = st.columns(5)
                     r1.metric("Reviewed Days", len(past_review_df))
-                    r2.metric("True", true_count)
-                    r3.metric("Accuracy", f"{accuracy_pct:.2f}%")
+                    r2.metric("Strong True", strong_true_count)
+                    r3.metric("Near True", near_true_count)
+                    r4.metric("False", false_count)
+                    r5.metric("Accuracy", f"{accuracy_pct:.2f}%")
+
+                    if pd.notna(avg_error_pct):
+                        st.caption(f"Average prediction error: {avg_error_pct:.2f}%")
 
                     st.dataframe(style_prediction_review(past_review_df), use_container_width=True, height=420)
                 else:
