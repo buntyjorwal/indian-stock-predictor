@@ -15,6 +15,13 @@ try:
 except Exception:
     capital_market = None
 
+try:
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    from sklearn.linear_model import LinearRegression, Ridge
+    SKLEARN_OK = True
+except Exception:
+    SKLEARN_OK = False
+
 
 st.set_page_config(page_title="Indian Stock Market Predictor Ultimate", page_icon="📈", layout="wide")
 
@@ -302,7 +309,8 @@ FORECAST_CAP_MIN_PCT = 0.08
 FORECAST_CAP_MAX_PCT = 0.35
 HYBRID_MIN_CONFIDENCE = 60
 HYBRID_REVIEW_MAX_WINDOWS = 60
-
+ENSEMBLE_MIN_MODELS = 3
+MODEL_BACKTEST_DAYS_DEFAULT = 30
 
 
 @st.cache_data(show_spinner=False, ttl=900)
@@ -1096,7 +1104,262 @@ def get_support_resistance(df: pd.DataFrame) -> dict:
     }
 
 
-def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_tail: pd.DataFrame | None, risk_name: str, volatility: float, levels: dict, cap_meta: dict | None = None) -> str:
+
+# -----------------------------
+# Ensemble feature engineering
+# -----------------------------
+def create_ml_feature_frame(data: pd.DataFrame) -> pd.DataFrame:
+    df = data.copy()
+    df["Ret1"] = df["Close"].pct_change(1)
+    df["Ret3"] = df["Close"].pct_change(3)
+    df["Ret5"] = df["Close"].pct_change(5)
+    df["Ret10"] = df["Close"].pct_change(10)
+    df["Lag1"] = df["Close"].shift(1)
+    df["Lag2"] = df["Close"].shift(2)
+    df["Lag3"] = df["Close"].shift(3)
+    df["Lag5"] = df["Close"].shift(5)
+    df["Lag10"] = df["Close"].shift(10)
+    df["RollingMean5"] = df["Close"].rolling(5).mean()
+    df["RollingMean10"] = df["Close"].rolling(10).mean()
+    df["RollingMean20"] = df["Close"].rolling(20).mean()
+    df["RollingStd5"] = df["Close"].rolling(5).std()
+    df["RollingStd10"] = df["Close"].rolling(10).std()
+    df["RollingStd20"] = df["Close"].rolling(20).std()
+    df["RangePct"] = (df["High"] - df["Low"]) / df["Close"].replace(0, np.nan)
+    df["OpenClosePct"] = (df["Close"] - df["Open"]) / df["Open"].replace(0, np.nan)
+    df["VolumeChg1"] = df["Volume"].pct_change(1).replace([np.inf, -np.inf], np.nan)
+    df["VolumeMean5"] = df["Volume"].rolling(5).mean()
+    df["VolumeMean20"] = df["Volume"].rolling(20).mean()
+    df["Target"] = df["Close"].shift(-1)
+    return df
+
+
+def get_feature_columns(df: pd.DataFrame) -> list:
+    cols = [
+        "Lag1", "Lag2", "Lag3", "Lag5", "Lag10",
+        "Ret1", "Ret3", "Ret5", "Ret10",
+        "RollingMean5", "RollingMean10", "RollingMean20",
+        "RollingStd5", "RollingStd10", "RollingStd20",
+        "SMA20", "SMA50", "SMA200",
+        "EMA12", "EMA26", "RSI14", "MACD", "MACDSignal", "MACDHist",
+        "BB_Mid", "BB_Upper", "BB_Lower", "ATR14",
+        "RangePct", "OpenClosePct", "Volume", "VolumeChg1", "VolumeMean5", "VolumeMean20",
+    ]
+    return [c for c in cols if c in df.columns]
+
+
+def safe_mape(actual: np.ndarray, pred: np.ndarray) -> float:
+    actual = np.asarray(actual, dtype=float)
+    pred = np.asarray(pred, dtype=float)
+    denom = np.where(np.abs(actual) < 1e-9, np.nan, np.abs(actual))
+    val = np.nanmean(np.abs(actual - pred) / denom) * 100
+    if pd.isna(val):
+        return 999.0
+    return float(val)
+
+
+def direction_accuracy(actual: np.ndarray, pred: np.ndarray, prev: np.ndarray) -> float:
+    actual_move = np.sign(np.asarray(actual, dtype=float) - np.asarray(prev, dtype=float))
+    pred_move = np.sign(np.asarray(pred, dtype=float) - np.asarray(prev, dtype=float))
+    if len(actual_move) == 0:
+        return 0.0
+    return float(np.mean(actual_move == pred_move) * 100)
+
+
+def clip_to_realistic_band(pred_value: float, current_price: float, hist_prices: pd.Series) -> float:
+    daily_ret = hist_prices.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    ann_vol = float(daily_ret.std() * np.sqrt(252)) if not daily_ret.empty else 0.0
+    cap_pct = min(FORECAST_CAP_MAX_PCT, max(FORECAST_CAP_MIN_PCT, ann_vol * FORECAST_CAP_SIGMA / np.sqrt(252)))
+    floor_price = max(FORECAST_MIN_CLIP, current_price * (1 - cap_pct))
+    ceiling_price = max(floor_price, current_price * (1 + cap_pct))
+    return float(np.clip(pred_value, floor_price, ceiling_price))
+
+
+def train_model_by_name(name: str):
+    if name == "Linear Regression":
+        return LinearRegression()
+    if name == "Ridge Regression":
+        return Ridge(alpha=1.0)
+    if name == "Random Forest":
+        return RandomForestRegressor(n_estimators=200, max_depth=8, min_samples_leaf=3, random_state=42)
+    if name == "Gradient Boosting":
+        return GradientBoostingRegressor(random_state=42, n_estimators=250, learning_rate=0.04, max_depth=2)
+    raise ValueError(f"Unknown model: {name}")
+
+
+def prophet_next_close(train_df: pd.DataFrame) -> float:
+    tmp = train_df[["Close"]].reset_index().copy()
+    date_col = tmp.columns[0]
+    tmp = tmp.rename(columns={date_col: "ds", "Close": "y"})
+    tmp["y"] = pd.to_numeric(tmp["y"], errors="coerce")
+    tmp = tmp.dropna()
+    tmp = tmp[tmp["y"] > 0]
+    if len(tmp) < PREDICTION_MIN_ROWS:
+        return float(tmp["y"].iloc[-1]) if not tmp.empty else FORECAST_MIN_CLIP
+    log_df = tmp.copy()
+    log_df["y"] = np.log(log_df["y"])
+    model = Prophet(daily_seasonality=False, weekly_seasonality=True, yearly_seasonality=True, changepoint_prior_scale=0.12)
+    model.fit(log_df)
+    future = model.make_future_dataframe(periods=1)
+    fc = model.predict(future)
+    return float(np.exp(fc["yhat"].iloc[-1]))
+
+
+def technical_vote_prediction(train_df: pd.DataFrame) -> tuple[float, str, float]:
+    last = train_df.iloc[-1]
+    current = float(last["Close"])
+    score = 0
+    if pd.notna(last.get("SMA20")) and current > float(last["SMA20"]):
+        score += 1
+    else:
+        score -= 1
+    if pd.notna(last.get("SMA50")) and current > float(last["SMA50"]):
+        score += 1
+    else:
+        score -= 1
+    if pd.notna(last.get("RSI14")):
+        rsi = float(last["RSI14"])
+        if rsi < 35:
+            score += 1
+        elif rsi > 68:
+            score -= 1
+    if pd.notna(last.get("MACD")) and pd.notna(last.get("MACDSignal")):
+        score += 1 if float(last["MACD"]) >= float(last["MACDSignal"]) else -1
+
+    atr = float(last["ATR14"]) if pd.notna(last.get("ATR14")) else current * 0.015
+    bias = 0.35 * atr * score
+    pred = max(FORECAST_MIN_CLIP, current + bias)
+    direction = "Bullish" if pred > current else "Bearish" if pred < current else "Neutral"
+    confidence = min(90.0, max(40.0, 50 + abs(score) * 10))
+    return pred, direction, confidence
+
+
+def backtest_ml_model(feature_df: pd.DataFrame, feature_cols: list, model_name: str, holdout_days: int) -> dict:
+    valid_df = feature_df.dropna(subset=feature_cols + ["Target", "Close"]).copy()
+    if len(valid_df) < BACKTEST_MIN_ROWS:
+        return {"ok": False, "reason": "Not enough rows for backtest."}
+    holdout = min(holdout_days, max(10, len(valid_df) // 5))
+    train_df = valid_df.iloc[:-holdout].copy()
+    test_df = valid_df.iloc[-holdout:].copy()
+    if len(train_df) < 80:
+        return {"ok": False, "reason": "Training window too small."}
+
+    try:
+        if model_name == "Prophet":
+            preds, prevs, actuals = [], [], []
+            for i in range(len(test_df)):
+                train_slice_end = len(train_df) + i
+                sub_train = valid_df.iloc[:train_slice_end].copy()
+                pred = prophet_next_close(sub_train)
+                pred = clip_to_realistic_band(pred, float(sub_train["Close"].iloc[-1]), sub_train["Close"])
+                preds.append(pred)
+                prevs.append(float(sub_train["Close"].iloc[-1]))
+                actuals.append(float(valid_df.iloc[train_slice_end]["Target"]))
+        elif model_name == "Technical Vote":
+            preds, prevs, actuals = [], [], []
+            for i in range(len(test_df)):
+                train_slice_end = len(train_df) + i
+                sub_train = valid_df.iloc[:train_slice_end].copy()
+                pred, _, _ = technical_vote_prediction(sub_train)
+                pred = clip_to_realistic_band(pred, float(sub_train["Close"].iloc[-1]), sub_train["Close"])
+                preds.append(pred)
+                prevs.append(float(sub_train["Close"].iloc[-1]))
+                actuals.append(float(valid_df.iloc[train_slice_end]["Target"]))
+        else:
+            model = train_model_by_name(model_name)
+            model.fit(train_df[feature_cols], train_df["Target"])
+            preds = model.predict(test_df[feature_cols])
+            prevs = test_df["Close"].values
+            actuals = test_df["Target"].values
+            preds = [clip_to_realistic_band(p, c, train_df["Close"]) for p, c in zip(preds, prevs)]
+
+        preds = np.asarray(preds, dtype=float)
+        actuals = np.asarray(actuals, dtype=float)
+        prevs = np.asarray(prevs, dtype=float)
+        mae = float(np.mean(np.abs(actuals - preds)))
+        rmse = float(np.sqrt(np.mean((actuals - preds) ** 2)))
+        mape = safe_mape(actuals, preds)
+        dacc = direction_accuracy(actuals, preds, prevs)
+        return {"ok": True, "mae": mae, "rmse": rmse, "mape": mape, "direction_accuracy": dacc, "actuals": actuals, "preds": preds, "prevs": prevs, "dates": test_df.index}
+    except Exception as ex:
+        return {"ok": False, "reason": str(ex)}
+
+
+def build_ensemble(data: pd.DataFrame, holdout_days: int = MODEL_BACKTEST_DAYS_DEFAULT) -> dict:
+    df = create_ml_feature_frame(add_indicators(data.copy()))
+    feature_cols = get_feature_columns(df)
+    valid_df = df.dropna(subset=feature_cols + ["Target", "Close"]).copy()
+    if len(valid_df) < BACKTEST_MIN_ROWS:
+        return {"ok": False, "reason": "Not enough clean rows for ensemble. Try a stock with longer history."}
+    if not SKLEARN_OK:
+        return {"ok": False, "reason": "scikit-learn is not installed in this environment."}
+
+    model_names = ["Prophet", "Linear Regression", "Ridge Regression", "Random Forest", "Gradient Boosting", "Technical Vote"]
+    rows = []
+    current_close = float(valid_df["Close"].iloc[-1])
+    hist_prices = valid_df["Close"]
+
+    for model_name in model_names:
+        bt = backtest_ml_model(valid_df, feature_cols, model_name, holdout_days)
+        if not bt.get("ok"):
+            continue
+        try:
+            if model_name == "Prophet":
+                pred = prophet_next_close(valid_df)
+                pred = clip_to_realistic_band(pred, current_close, hist_prices)
+                conf = max(35.0, min(90.0, 100 - bt["mape"] + (bt["direction_accuracy"] - 50) * 0.3))
+            elif model_name == "Technical Vote":
+                pred, _, tech_conf = technical_vote_prediction(valid_df)
+                pred = clip_to_realistic_band(pred, current_close, hist_prices)
+                conf = (tech_conf * 0.4) + (max(40.0, 100 - bt["mape"]) * 0.3) + (bt["direction_accuracy"] * 0.3)
+            else:
+                model = train_model_by_name(model_name)
+                model.fit(valid_df[feature_cols], valid_df["Target"])
+                X_last = valid_df[feature_cols].iloc[[-1]]
+                pred = float(model.predict(X_last)[0])
+                pred = clip_to_realistic_band(pred, current_close, hist_prices)
+                conf = max(35.0, min(92.0, 100 - bt["mape"] + (bt["direction_accuracy"] - 50) * 0.35))
+
+            move_pct = ((pred - current_close) / current_close * 100) if current_close else 0.0
+            direction = "Bullish" if pred > current_close else "Bearish" if pred < current_close else "Neutral"
+            weight = (1.0 / max(bt["mape"], 0.5)) * (0.6 + bt["direction_accuracy"] / 100)
+            rows.append({"Model": model_name, "Predicted ₹": pred, "Move %": move_pct, "Direction": direction, "MAPE %": bt["mape"], "RMSE": bt["rmse"], "Dir Acc %": bt["direction_accuracy"], "Confidence %": conf, "Weight": weight})
+        except Exception:
+            continue
+
+    result_df = pd.DataFrame(rows)
+    if result_df.empty or len(result_df) < ENSEMBLE_MIN_MODELS:
+        return {"ok": False, "reason": "Could not produce enough successful model outputs for ensemble."}
+
+    result_df["NormWeight"] = result_df["Weight"] / result_df["Weight"].sum()
+    final_pred = float((result_df["Predicted ₹"] * result_df["NormWeight"]).sum())
+    final_move_pct = ((final_pred - current_close) / current_close * 100) if current_close else 0.0
+    final_direction = "Bullish" if final_pred > current_close else "Bearish" if final_pred < current_close else "Neutral"
+    agreement = float(max((result_df["Direction"] == final_direction).mean() * 100, 0.0))
+    ensemble_conf = float(np.clip((result_df["Confidence %"] * result_df["NormWeight"]).sum() * 0.65 + agreement * 0.35, 35, 95))
+
+    return {"ok": True, "models_df": result_df.sort_values(["Dir Acc %", "MAPE %"], ascending=[False, True]).reset_index(drop=True), "current_close": current_close, "final_pred": final_pred, "final_move_pct": final_move_pct, "final_direction": final_direction, "agreement_pct": agreement, "ensemble_confidence": ensemble_conf}
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def build_ensemble_comparison_snapshot(symbols: tuple, holdout_days: int = MODEL_BACKTEST_DAYS_DEFAULT) -> pd.DataFrame:
+    rows = []
+    for sym in symbols:
+        try:
+            d, _, _ = fetch_stock_data(sym)
+            if d.empty or len(d) < BACKTEST_MIN_ROWS:
+                continue
+            ens = build_ensemble(d, holdout_days=holdout_days)
+            if not ens.get("ok"):
+                continue
+            rows.append({"Symbol": sym, "Current Close": round(float(ens["current_close"]), 2), "Ensemble Pred": round(float(ens["final_pred"]), 2), "Move %": round(float(ens["final_move_pct"]), 2), "Direction": ens["final_direction"], "Agreement %": round(float(ens["agreement_pct"]), 2), "Ensemble Confidence %": round(float(ens["ensemble_confidence"]), 2), "Models Used": int(len(ens["models_df"]))})
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+
+
+def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_tail: pd.DataFrame | None, risk_name: str, volatility: float, levels: dict, cap_meta: dict | None = None, ensemble_result: dict | None = None) -> str:
     move_text = "Forecast currently unavailable."
     reliability_text = ""
     if forecast_tail is not None and not forecast_tail.empty:
@@ -1117,17 +1380,20 @@ def build_ai_insight(symbol: str, current_price: float, signal: dict, forecast_t
     reasons = ", ".join(signal["reasons"][:4]) if signal["reasons"] else "limited technical confirmation"
     support_text = f"Nearest support is ₹ {fmt_num(levels['support'])}" if levels["support"] is not None else "Support level is not clearly identified"
     resistance_text = f"nearest resistance is ₹ {fmt_num(levels['resistance'])}" if levels["resistance"] is not None else "resistance level is not clearly identified"
+    ensemble_text = ""
+    if ensemble_result and ensemble_result.get("ok"):
+        ensemble_text = (
+            f" Weighted ensemble output suggests ₹ {fmt_num(ensemble_result['final_pred'])} with {ensemble_result['ensemble_confidence']:.1f}% confidence, "
+            f"{ensemble_result['agreement_pct']:.1f}% model agreement, and a {ensemble_result['final_direction'].lower()} bias."
+        )
 
     return (
         f"For {symbol}, the technical signal is {signal['label']} with {signal['confidence']}% confidence. "
-        f"Key drivers are: {reasons}. {move_text}{reliability_text} Annualized volatility is {volatility:.2f}%, so risk is classified as {risk_name}. "
+        f"Key drivers are: {reasons}. {move_text}{reliability_text}{ensemble_text} Annualized volatility is {volatility:.2f}%, so risk is classified as {risk_name}. "
         f"{support_text}, and {resistance_text}. This is a model-assisted summary, not trading advice."
     )
 
 
-# -----------------------------
-# External info blocks
-# -----------------------------
 @st.cache_data(show_spinner=False, ttl=1800)
 def fetch_fundamentals(symbol: str) -> dict:
     try:
@@ -1375,6 +1641,7 @@ default_symbol = quick_stocks[selected_quick] if selected_quick != "Custom" else
 symbol_input = st.sidebar.text_input("Enter Stock Symbol", value=default_symbol).strip().upper()
 symbol = normalize_symbol(symbol_input)
 days = st.sidebar.slider("Days to Predict", min_value=7, max_value=60, value=15)
+model_backtest_days = st.sidebar.slider("Ensemble Backtest Days", min_value=15, max_value=60, value=MODEL_BACKTEST_DAYS_DEFAULT)
 show_backtest = st.sidebar.checkbox("Show Backtest", value=True)
 show_technical = st.sidebar.checkbox("Show Technical Indicators", value=True)
 show_fundamentals = st.sidebar.checkbox("Show Fundamentals", value=True)
@@ -1494,8 +1761,12 @@ if run_btn:
         except Exception as ex:
             forecast_error = str(ex)
 
+        ensemble_result = None
         if has_indicator_data:
-            ai_summary = build_ai_insight(symbol, current_price, signal, future_rows, risk_name, volatility, levels, forecast.attrs.get("cap_meta", {}))
+            ensemble_result = build_ensemble(data, holdout_days=model_backtest_days)
+
+        if has_indicator_data:
+            ai_summary = build_ai_insight(symbol, current_price, signal, future_rows, risk_name, volatility, levels, forecast.attrs.get("cap_meta", {}), ensemble_result)
         else:
             ai_summary = f"For {symbol}, limited market history was available in this run, so full technical insight and forecast confidence may be restricted."
         progress.progress(100)
@@ -1536,8 +1807,8 @@ if run_btn:
 
         st.markdown(f"<div class='ai-box'><b>🧠 AI Insight</b><br><br>{ai_summary}</div>", unsafe_allow_html=True)
 
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
-            ["Overview", "Technical Analysis", "Forecast", "Backtest", "Fundamentals", "Watchlist", "Comparison", "News Sentiment", "Portfolio"]
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
+            ["Overview", "Technical Analysis", "Forecast", "Ensemble Models", "Backtest", "Fundamentals", "Watchlist", "Comparison", "News Sentiment", "Portfolio"]
         )
 
         with tab1:
@@ -1769,6 +2040,46 @@ if run_btn:
                     st.dataframe(style_hybrid_review(hybrid_review_df[display_cols]), use_container_width=True, height=430)
 
         with tab4:
+            st.subheader("🧠 Ensemble Model Comparison")
+            if not has_indicator_data:
+                st.info("Ensemble needs enough indicator history to run.")
+            elif not SKLEARN_OK:
+                st.warning("scikit-learn is not installed, so the ensemble models cannot run in this environment.")
+            elif not ensemble_result or not ensemble_result.get("ok"):
+                st.warning(ensemble_result.get("reason", "Ensemble result is not available right now.") if isinstance(ensemble_result, dict) else "Ensemble result is not available right now.")
+            else:
+                e1, e2, e3, e4, e5 = st.columns(5)
+                e1.metric("Current Close", f"₹ {fmt_num(ensemble_result['current_close'])}")
+                e2.metric("Final Ensemble Pred", f"₹ {fmt_num(ensemble_result['final_pred'])}")
+                e3.metric("Move %", f"{ensemble_result['final_move_pct']:.2f}%")
+                e4.metric("Direction", ensemble_result["final_direction"])
+                e5.metric("Confidence", f"{ensemble_result['ensemble_confidence']:.2f}%")
+
+                ea1, ea2 = st.columns(2)
+                ea1.metric("Model Agreement", f"{ensemble_result['agreement_pct']:.2f}%")
+                ea2.metric("Models Used", len(ensemble_result["models_df"]))
+
+                st.dataframe(
+                    ensemble_result["models_df"][["Model", "Predicted ₹", "Move %", "Direction", "MAPE %", "RMSE", "Dir Acc %", "Confidence %", "NormWeight"]].round(2),
+                    use_container_width=True,
+                    height=360,
+                )
+
+                fig_ens = go.Figure()
+                mdf = ensemble_result["models_df"].copy()
+                fig_ens.add_trace(go.Bar(x=mdf["Model"], y=mdf["Predicted ₹"], name="Predicted Price"))
+                fig_ens.add_trace(go.Scatter(x=mdf["Model"], y=mdf["Dir Acc %"], mode="lines+markers", name="Direction Accuracy %", yaxis="y2"))
+                fig_ens.update_layout(
+                    title="Model-wise Predicted Price vs Direction Accuracy",
+                    xaxis_title="Model",
+                    yaxis_title="Predicted Price",
+                    yaxis2=dict(title="Direction Accuracy %", overlaying="y", side="right"),
+                    height=460
+                )
+                st.plotly_chart(fig_ens, use_container_width=True)
+
+
+        with tab5:
             st.subheader("🧪 Backtest Accuracy")
             if show_backtest:
                 bt = simple_backtest(data, holdout_days=30)
@@ -1804,7 +2115,7 @@ if run_btn:
             else:
                 st.info("Backtest is hidden from sidebar settings.")
 
-        with tab5:
+        with tab6:
             st.subheader("🏢 Fundamentals")
             if not show_fundamentals:
                 st.info("Fundamentals are hidden from sidebar settings.")
@@ -1824,7 +2135,7 @@ if run_btn:
                 f7.metric("52W High", fmt_num(fundamentals.get("fiftyTwoWeekHigh")))
                 f8.metric("52W Low", fmt_num(fundamentals.get("fiftyTwoWeekLow")))
 
-        with tab6:
+        with tab7:
             st.subheader("⭐ Watchlist Dashboard")
             if not st.session_state.watchlist:
                 st.info("Your watchlist is empty.")
@@ -1835,7 +2146,7 @@ if run_btn:
                 else:
                     st.dataframe(wl_df, use_container_width=True)
 
-        with tab7:
+        with tab8:
             st.subheader("⚖️ Comparison Dashboard")
             if len(compare_symbols) < 2:
                 st.info("Add at least 2 stocks in comparison mode.")
@@ -1852,14 +2163,21 @@ if run_btn:
                         fig_cmp.update_layout(title="60-Day Relative Performance (Base = 100)", xaxis_title="Date", yaxis_title="Indexed Value", height=500)
                         st.plotly_chart(fig_cmp, use_container_width=True)
 
-        with tab8:
+                    st.markdown("### Ensemble Comparison")
+                    ensemble_cmp_df = build_ensemble_comparison_snapshot(tuple(compare_symbols), holdout_days=model_backtest_days)
+                    if ensemble_cmp_df.empty:
+                        st.info("Ensemble comparison is not available for one or more selected stocks yet.")
+                    else:
+                        st.dataframe(ensemble_cmp_df, use_container_width=True)
+
+        with tab9:
             st.subheader("📰 News Sentiment")
             if news_df.empty:
                 st.info("Recent news not available right now.")
             else:
                 st.dataframe(news_df[["Published", "Title", "Publisher", "Sentiment", "SentimentScore"]], use_container_width=True)
 
-        with tab9:
+        with tab10:
             st.subheader("💼 Portfolio Tracker")
             pf1, pf2, pf3 = st.columns(3)
             with pf1:
