@@ -300,6 +300,9 @@ FORECAST_MIN_CLIP = 0.01
 FORECAST_CAP_SIGMA = 2.0
 FORECAST_CAP_MIN_PCT = 0.08
 FORECAST_CAP_MAX_PCT = 0.35
+HYBRID_MIN_CONFIDENCE = 60
+HYBRID_REVIEW_MAX_WINDOWS = 60
+
 
 
 @st.cache_data(show_spinner=False, ttl=900)
@@ -759,6 +762,301 @@ def generate_signal(df: pd.DataFrame) -> dict:
     confidence = min(95, max(35, 50 + (abs(score) * 8)))
     return {"label": label, "score": score, "reasons": reasons, "color": color, "confidence": confidence}
 
+
+
+
+def classify_direction(pred_move: float, actual_move: float) -> str:
+    if (pred_move > 0 and actual_move > 0) or (pred_move < 0 and actual_move < 0):
+        return "Yes"
+    if abs(pred_move) < 1e-9 and abs(actual_move) < 1e-9:
+        return "Yes"
+    return "No"
+
+
+def get_trend_bias(last_row: pd.Series) -> tuple[int, str]:
+    close = float(last_row["Close"])
+    sma20 = float(last_row["SMA20"]) if pd.notna(last_row.get("SMA20")) else np.nan
+    sma50 = float(last_row["SMA50"]) if pd.notna(last_row.get("SMA50")) else np.nan
+    sma200 = float(last_row["SMA200"]) if pd.notna(last_row.get("SMA200")) else np.nan
+
+    if pd.notna(sma50) and pd.notna(sma200) and close > sma50 > sma200:
+        return 1, "Bullish Trend"
+    if pd.notna(sma50) and pd.notna(sma200) and close < sma50 < sma200:
+        return -1, "Bearish Trend"
+    if pd.notna(sma20) and close > sma20:
+        return 1, "Short-term Bullish"
+    if pd.notna(sma20) and close < sma20:
+        return -1, "Short-term Bearish"
+    return 0, "Sideways"
+
+
+def hybrid_model_prediction(train_price_df: pd.DataFrame, horizon: int = 1) -> tuple[float, float, float]:
+    log_train = train_price_df.copy()
+    log_train["y"] = np.log(log_train["y"])
+
+    model = Prophet(
+        daily_seasonality=False,
+        weekly_seasonality=True,
+        yearly_seasonality=True,
+        changepoint_prior_scale=0.10 if horizon <= 3 else 0.15,
+    )
+    model.fit(log_train)
+
+    future = model.make_future_dataframe(periods=horizon)
+    fc = model.predict(future)
+    pred_price = float(np.exp(fc["yhat"].iloc[-1]))
+    pred_low = float(np.exp(fc["yhat_lower"].iloc[-1]))
+    pred_high = float(np.exp(fc["yhat_upper"].iloc[-1]))
+    return pred_price, pred_low, pred_high
+
+
+def hybrid_decision_from_train(train_market_df: pd.DataFrame, horizon: int = 1, min_confidence: int = HYBRID_MIN_CONFIDENCE) -> dict:
+    if len(train_market_df) < max(PREDICTION_MIN_ROWS, 220):
+        return {"ok": False, "reason": "Not enough rows for hybrid decision."}
+
+    train_price_df = train_market_df[["Close"]].reset_index().rename(columns={train_market_df.index.name or train_market_df.reset_index().columns[0]: "ds", "Close": "y"})
+    # safer rename if ds missing
+    if "ds" not in train_price_df.columns:
+        train_price_df.columns = ["ds", "y"]
+    train_price_df["ds"] = pd.to_datetime(train_price_df["ds"])
+    train_price_df["y"] = pd.to_numeric(train_price_df["y"], errors="coerce")
+    train_price_df = train_price_df.dropna()
+
+    last = train_market_df.iloc[-1]
+    prev_close = float(last["Close"])
+
+    try:
+        pred_price, pred_low, pred_high = hybrid_model_prediction(train_price_df[["ds", "y"]].copy(), horizon=horizon)
+        pred_price = sanitize_single_prediction(pred_price, prev_close, train_price_df["y"])
+        pred_low = sanitize_single_prediction(pred_low, prev_close, train_price_df["y"])
+        pred_high = sanitize_single_prediction(pred_high, prev_close, train_price_df["y"])
+    except Exception as ex:
+        return {"ok": False, "reason": str(ex)}
+
+    prophet_move_pct = ((pred_price - prev_close) / prev_close * 100) if prev_close else 0.0
+    signal = generate_signal(train_market_df)
+    trend_bias, trend_label = get_trend_bias(last)
+    rsi = float(last["RSI14"]) if pd.notna(last.get("RSI14")) else np.nan
+    macd = float(last["MACD"]) if pd.notna(last.get("MACD")) else np.nan
+    macd_signal = float(last["MACDSignal"]) if pd.notna(last.get("MACDSignal")) else np.nan
+    atr14 = float(last["ATR14"]) if pd.notna(last.get("ATR14")) else np.nan
+    atr_pct = ((atr14 / prev_close) * 100) if prev_close and pd.notna(atr14) else np.nan
+
+    score = 0.0
+    reasons = []
+
+    if prophet_move_pct > 0.15:
+        score += 2.0
+        reasons.append("Prophet bullish")
+    elif prophet_move_pct < -0.15:
+        score -= 2.0
+        reasons.append("Prophet bearish")
+    else:
+        reasons.append("Prophet flat")
+
+    score += max(-2, min(2, signal["score"] / 2.0))
+    reasons.append(f"Technical score {signal['score']}")
+
+    score += 1.5 * trend_bias
+    reasons.append(trend_label)
+
+    if pd.notna(rsi):
+        if 52 <= rsi <= 68:
+            score += 0.75
+            reasons.append("RSI bullish zone")
+        elif 32 <= rsi <= 48:
+            score -= 0.75
+            reasons.append("RSI bearish zone")
+        elif 48 < rsi < 52:
+            reasons.append("RSI neutral")
+
+    if pd.notna(macd) and pd.notna(macd_signal):
+        if macd > macd_signal:
+            score += 0.75
+            reasons.append("MACD support bullish")
+        else:
+            score -= 0.75
+            reasons.append("MACD support bearish")
+
+    if pd.notna(atr_pct) and atr_pct > 4.0:
+        score *= 0.85
+        reasons.append("High volatility penalty")
+
+    direction = "UP" if score > 0.35 else "DOWN" if score < -0.35 else "SKIP"
+    confidence = min(95, max(35, int(52 + abs(score) * 10 + abs(prophet_move_pct) * 2)))
+
+    if abs(prophet_move_pct) < 0.35:
+        confidence = max(35, confidence - 12)
+        reasons.append("Tiny expected move")
+    if trend_bias == 0 and abs(signal["score"]) <= 1:
+        confidence = max(35, confidence - 10)
+        reasons.append("Sideways setup")
+
+    is_skipped = direction == "SKIP" or confidence < min_confidence
+
+    return {
+        "ok": True,
+        "pred_price": pred_price,
+        "pred_low": min(pred_low, pred_price),
+        "pred_high": max(pred_high, pred_price),
+        "prev_close": prev_close,
+        "prophet_move_pct": prophet_move_pct,
+        "hybrid_score": score,
+        "direction": direction,
+        "confidence": confidence,
+        "skip": is_skipped,
+        "signal": signal,
+        "trend": trend_label,
+        "atr_pct": atr_pct,
+        "reasons": reasons[:6],
+    }
+
+
+def classify_hybrid_result(pred_price: float, actual_price: float, prev_close: float, skipped: bool) -> tuple[str, str, float, str]:
+    pred_move = float(pred_price) - float(prev_close)
+    actual_move = float(actual_price) - float(prev_close)
+    error_pct = (abs(actual_price - pred_price) / actual_price * 100) if actual_price else np.nan
+    direction_match = classify_direction(pred_move, actual_move)
+
+    if skipped:
+        return "Skipped", "gray", error_pct, direction_match
+    if direction_match == "Yes" and pd.notna(error_pct) and error_pct <= 1.5:
+        return "Strong True", "green", error_pct, direction_match
+    if direction_match == "Yes" and pd.notna(error_pct) and error_pct <= 4.0:
+        return "Near True", "green", error_pct, direction_match
+    return "False", "red", error_pct, direction_match
+
+
+def build_hybrid_prediction_review(data: pd.DataFrame, lookback_windows: int = 30, horizon: int = 1, min_confidence: int = HYBRID_MIN_CONFIDENCE) -> pd.DataFrame:
+    market_df = add_indicators(data.copy()).dropna(subset=["Close"]).copy()
+    market_df = market_df.sort_index()
+    if len(market_df) < max(240, PREDICTION_MIN_ROWS + horizon + 10):
+        return pd.DataFrame()
+
+    rows = []
+    max_windows = min(lookback_windows, len(market_df) - 220 - horizon)
+    for step_back in range(max_windows, 0, -1):
+        target_idx = len(market_df) - step_back
+        future_idx = target_idx + horizon
+        if future_idx >= len(market_df):
+            continue
+
+        train_df = market_df.iloc[:target_idx].copy()
+        if len(train_df) < 220:
+            continue
+
+        decision = hybrid_decision_from_train(train_df, horizon=horizon, min_confidence=min_confidence)
+        if not decision.get("ok"):
+            continue
+
+        prev_close = decision["prev_close"]
+        actual_price = float(market_df.iloc[future_idx]["Close"])
+        result, color, error_pct, direction_match = classify_hybrid_result(decision["pred_price"], actual_price, prev_close, decision["skip"])
+        actual_move_pct = ((actual_price - prev_close) / prev_close * 100) if prev_close else np.nan
+
+        rows.append({
+            "Signal Date": train_df.index[-1],
+            "Target Date": market_df.index[future_idx],
+            "Horizon": f"{horizon}D",
+            "Previous Close ₹": prev_close,
+            "Predicted ₹": decision["pred_price"],
+            "Lower ₹": decision["pred_low"],
+            "Upper ₹": decision["pred_high"],
+            "Actual ₹": actual_price,
+            "Predicted Move %": decision["prophet_move_pct"],
+            "Actual Move %": actual_move_pct,
+            "Error %": error_pct,
+            "Hybrid Score": decision["hybrid_score"],
+            "Confidence %": decision["confidence"],
+            "Trend": decision["trend"],
+            "Direction": decision["direction"],
+            "Direction Match": direction_match,
+            "Result": result,
+            "ResultColor": color,
+            "Skip": "Yes" if decision["skip"] else "No",
+            "Why": ", ".join(decision["reasons"]),
+            "Type": "Hybrid Review",
+        })
+
+    return pd.DataFrame(rows)
+
+
+def summarize_hybrid_accuracy(review_df: pd.DataFrame) -> dict:
+    if review_df.empty:
+        return {"eligible": 0, "skipped": 0, "strong": 0, "near": 0, "false": 0, "accuracy": 0.0, "avg_error": np.nan}
+    eligible_df = review_df[review_df["Skip"] == "No"].copy()
+    skipped = int((review_df["Skip"] == "Yes").sum())
+    strong = int((eligible_df["Result"] == "Strong True").sum())
+    near = int((eligible_df["Result"] == "Near True").sum())
+    false = int((eligible_df["Result"] == "False").sum())
+    eligible = len(eligible_df)
+    accuracy = ((strong + near) / eligible * 100) if eligible else 0.0
+    avg_error = float(pd.to_numeric(eligible_df.get("Error %"), errors="coerce").dropna().mean()) if eligible else np.nan
+    return {"eligible": eligible, "skipped": skipped, "strong": strong, "near": near, "false": false, "accuracy": accuracy, "avg_error": avg_error}
+
+
+def rolling_walk_forward_backtest(data: pd.DataFrame, horizons=(1, 3, 5), min_confidence: int = HYBRID_MIN_CONFIDENCE, max_windows: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
+    summary_rows = []
+    detail_frames = []
+    for horizon in horizons:
+        review_df = build_hybrid_prediction_review(data, lookback_windows=max_windows, horizon=horizon, min_confidence=min_confidence)
+        if review_df.empty:
+            continue
+        stats = summarize_hybrid_accuracy(review_df)
+        eligible_df = review_df[review_df["Skip"] == "No"].copy()
+        if not eligible_df.empty:
+            detail_frames.append(eligible_df)
+        summary_rows.append({
+            "Horizon": f"{horizon}D",
+            "Signals Taken": stats["eligible"],
+            "Skipped": stats["skipped"],
+            "Strong True": stats["strong"],
+            "Near True": stats["near"],
+            "False": stats["false"],
+            "Accuracy %": round(stats["accuracy"], 2),
+            "Avg Error %": round(stats["avg_error"], 2) if pd.notna(stats["avg_error"]) else np.nan,
+        })
+    summary_df = pd.DataFrame(summary_rows)
+    detail_df = pd.concat(detail_frames, ignore_index=True) if detail_frames else pd.DataFrame()
+    return summary_df, detail_df
+
+
+def style_hybrid_review(df: pd.DataFrame):
+    if df.empty:
+        return df
+
+    def color_result(val):
+        key = str(val).strip().lower()
+        if key == "strong true":
+            return "background-color:#bbf7d0;color:#14532d;font-weight:700;"
+        if key == "near true":
+            return "background-color:#dcfce7;color:#166534;font-weight:700;"
+        if key == "false":
+            return "background-color:#fee2e2;color:#991b1b;font-weight:700;"
+        if key == "skipped":
+            return "background-color:#e5e7eb;color:#374151;font-weight:700;"
+        return ""
+
+    def color_skip(val):
+        return "background-color:#e5e7eb;color:#374151;" if str(val) == "Yes" else ""
+
+    return (
+        df.style
+        .map(color_result, subset=["Result"])
+        .map(color_skip, subset=["Skip"])
+        .format({
+            "Previous Close ₹": "{:,.2f}",
+            "Predicted ₹": "{:,.2f}",
+            "Lower ₹": "{:,.2f}",
+            "Upper ₹": "{:,.2f}",
+            "Actual ₹": "{:,.2f}",
+            "Predicted Move %": "{:,.2f}%",
+            "Actual Move %": "{:,.2f}%",
+            "Error %": "{:,.2f}%",
+            "Hybrid Score": "{:,.2f}",
+            "Confidence %": "{:,.0f}%",
+        }, na_rep='-')
+    )
 
 def risk_level(df: pd.DataFrame) -> tuple[str, float]:
     daily_ret = df["Close"].pct_change().dropna()
@@ -1330,8 +1628,8 @@ if run_btn:
                 fig2.add_trace(go.Scatter(x=hist_df["ds"], y=hist_df["y"], mode="lines", name="Historical Actual"))
 
                 if not past_review_df.empty:
-                    true_df = past_review_df[past_review_df["Result"] == "TRUE"].copy()
-                    false_df = past_review_df[past_review_df["Result"] == "FALSE"].copy()
+                    true_df = past_review_df[past_review_df["Result"].isin(["Strong True", "Near True"])].copy()
+                    false_df = past_review_df[past_review_df["Result"] == "False"].copy()
 
                     if not true_df.empty:
                         fig2.add_trace(
@@ -1339,7 +1637,7 @@ if run_btn:
                                 x=true_df["Date"],
                                 y=true_df["Actual ₹"],
                                 mode="markers",
-                                name="Past Prediction True",
+                                name="Past Prediction Correct",
                                 marker=dict(color="green", size=10, symbol="circle"),
                                 customdata=np.stack(
                                     [
@@ -1360,7 +1658,7 @@ if run_btn:
                                     "Pred Move: %{customdata[3]:,.2f}%<br>"
                                     "Actual Move: %{customdata[4]:,.2f}%<br>"
                                     "Error: %{customdata[5]:,.2f}%<br>"
-                                    "Status: TRUE<extra></extra>"
+                                    "Status: Correct<extra></extra>"
                                 ),
                             )
                         )
@@ -1371,7 +1669,7 @@ if run_btn:
                                 x=false_df["Date"],
                                 y=false_df["Actual ₹"],
                                 mode="markers",
-                                name="Past Prediction False",
+                                name="Past Prediction Wrong",
                                 marker=dict(color="red", size=10, symbol="x"),
                                 customdata=np.stack(
                                     [
@@ -1392,7 +1690,7 @@ if run_btn:
                                     "Pred Move: %{customdata[3]:,.2f}%<br>"
                                     "Actual Move: %{customdata[4]:,.2f}%<br>"
                                     "Error: %{customdata[5]:,.2f}%<br>"
-                                    "Status: FALSE<extra></extra>"
+                                    "Status: Wrong<extra></extra>"
                                 ),
                             )
                         )
@@ -1440,6 +1738,36 @@ if run_btn:
                     height=420,
                 )
 
+                st.markdown("### 🚀 Hybrid Accuracy Engine")
+                hybrid_horizon = st.radio("Hybrid review horizon", options=[1, 3, 5], horizontal=True, key="hybrid_horizon_forecast")
+                hybrid_review_df = build_hybrid_prediction_review(data, lookback_windows=min(HYBRID_REVIEW_MAX_WINDOWS, max(20, days * 3)), horizon=hybrid_horizon, min_confidence=HYBRID_MIN_CONFIDENCE)
+                if hybrid_review_df.empty:
+                    st.info("Not enough historical data to build hybrid review yet.")
+                else:
+                    hybrid_stats = summarize_hybrid_accuracy(hybrid_review_df)
+                    h1, h2, h3, h4, h5, h6 = st.columns(6)
+                    h1.metric("Signals Taken", hybrid_stats["eligible"])
+                    h2.metric("Skipped", hybrid_stats["skipped"])
+                    h3.metric("Strong True", hybrid_stats["strong"])
+                    h4.metric("Near True", hybrid_stats["near"])
+                    h5.metric("False", hybrid_stats["false"])
+                    h6.metric("Accuracy", f"{hybrid_stats['accuracy']:.2f}%")
+                    if pd.notna(hybrid_stats["avg_error"]):
+                        st.caption(f"Average error on taken signals: {hybrid_stats['avg_error']:.2f}% | Low-confidence setups are automatically skipped below {HYBRID_MIN_CONFIDENCE}% confidence.")
+
+                    next_decision = hybrid_decision_from_train(data.copy(), horizon=hybrid_horizon, min_confidence=HYBRID_MIN_CONFIDENCE)
+                    if next_decision.get("ok"):
+                        nh1, nh2, nh3, nh4 = st.columns(4)
+                        label = "SKIP" if next_decision["skip"] else next_decision["direction"]
+                        nh1.metric("Next Hybrid Call", label)
+                        nh2.metric("Confidence", f"{next_decision['confidence']}%")
+                        nh3.metric("Hybrid Score", f"{next_decision['hybrid_score']:.2f}")
+                        nh4.metric("Trend Filter", next_decision["trend"])
+                        st.caption("Why: " + ", ".join(next_decision["reasons"]))
+
+                    display_cols = ["Signal Date", "Target Date", "Horizon", "Previous Close ₹", "Predicted ₹", "Actual ₹", "Predicted Move %", "Actual Move %", "Error %", "Confidence %", "Trend", "Direction", "Direction Match", "Result", "Skip", "Why"]
+                    st.dataframe(style_hybrid_review(hybrid_review_df[display_cols]), use_container_width=True, height=430)
+
         with tab4:
             st.subheader("🧪 Backtest Accuracy")
             if show_backtest:
@@ -1457,6 +1785,22 @@ if run_btn:
                     st.plotly_chart(fig_bt, use_container_width=True)
                 else:
                     st.warning(bt["reason"])
+
+                st.markdown("### Hybrid Walk-Forward Backtest")
+                summary_df, detail_df = rolling_walk_forward_backtest(data, horizons=(1, 3, 5), min_confidence=HYBRID_MIN_CONFIDENCE, max_windows=90)
+                if summary_df.empty:
+                    st.info("Hybrid walk-forward backtest is not available yet for this symbol.")
+                else:
+                    st.dataframe(summary_df, use_container_width=True)
+                    fig_hbt = go.Figure()
+                    fig_hbt.add_trace(go.Bar(x=summary_df["Horizon"], y=summary_df["Accuracy %"], name="Accuracy %"))
+                    fig_hbt.update_layout(title="Hybrid Accuracy by Horizon", xaxis_title="Horizon", yaxis_title="Accuracy %", height=420)
+                    st.plotly_chart(fig_hbt, use_container_width=True)
+
+                    if not detail_df.empty:
+                        st.markdown("#### Signal Details")
+                        detail_cols = ["Signal Date", "Target Date", "Horizon", "Predicted ₹", "Actual ₹", "Error %", "Confidence %", "Trend", "Direction", "Direction Match", "Result", "Why"]
+                        st.dataframe(style_hybrid_review(detail_df[detail_cols]), use_container_width=True, height=420)
             else:
                 st.info("Backtest is hidden from sidebar settings.")
 
