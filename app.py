@@ -483,6 +483,144 @@ def build_forecast(data: pd.DataFrame, days: int) -> tuple[pd.DataFrame, pd.Data
     forecast.attrs["cap_meta"] = cap_meta
     return hist_df, forecast
 
+
+def sanitize_single_prediction(pred_value: float, current_price: float, hist_prices: pd.Series) -> float:
+    try:
+        pred_value = float(pred_value)
+        current_price = float(current_price)
+    except Exception:
+        return max(FORECAST_MIN_CLIP, current_price)
+
+    daily_ret = hist_prices.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    ann_vol = float(daily_ret.std() * np.sqrt(252)) if not daily_ret.empty else 0.0
+    horizon_vol = ann_vol * np.sqrt(1 / 252.0)
+    cap_pct = min(FORECAST_CAP_MAX_PCT, max(FORECAST_CAP_MIN_PCT, horizon_vol * FORECAST_CAP_SIGMA))
+
+    floor_price = max(FORECAST_MIN_CLIP, current_price * (1 - cap_pct))
+    ceiling_price = max(floor_price, current_price * (1 + cap_pct))
+    return float(np.clip(pred_value, floor_price, ceiling_price))
+
+
+def build_past_prediction_review(data: pd.DataFrame, days: int) -> pd.DataFrame:
+    df = data[["Close"]].reset_index().copy()
+    date_col = df.columns[0]
+    df = df.rename(columns={date_col: "ds", "Close": "y"})
+    df["ds"] = pd.to_datetime(df["ds"])
+    df["y"] = pd.to_numeric(df["y"], errors="coerce")
+    df = df.dropna(subset=["ds", "y"]).copy()
+    df = df[df["y"] > 0].copy().reset_index(drop=True)
+
+    if len(df) < max(PREDICTION_MIN_ROWS + 5, days + 30):
+        return pd.DataFrame()
+
+    rows = []
+    review_days = min(days, len(df) - PREDICTION_MIN_ROWS - 1)
+
+    for step_back in range(review_days, 0, -1):
+        target_idx = len(df) - step_back
+        if target_idx <= 1:
+            continue
+
+        train = df.iloc[:target_idx].copy()
+        target_row = df.iloc[target_idx].copy()
+        prev_row = df.iloc[target_idx - 1].copy()
+
+        if len(train) < PREDICTION_MIN_ROWS:
+            continue
+
+        try:
+            log_train = train.copy()
+            log_train["y"] = np.log(log_train["y"])
+
+            model = Prophet(
+                daily_seasonality=False,
+                weekly_seasonality=True,
+                yearly_seasonality=True,
+                changepoint_prior_scale=0.15,
+            )
+            model.fit(log_train)
+
+            future = model.make_future_dataframe(periods=1)
+            fc = model.predict(future)
+
+            pred_price = float(np.exp(fc["yhat"].iloc[-1]))
+            pred_low = float(np.exp(fc["yhat_lower"].iloc[-1]))
+            pred_high = float(np.exp(fc["yhat_upper"].iloc[-1]))
+
+            pred_price = sanitize_single_prediction(pred_price, float(prev_row["y"]), train["y"])
+            pred_low = sanitize_single_prediction(pred_low, float(prev_row["y"]), train["y"])
+            pred_high = sanitize_single_prediction(pred_high, float(prev_row["y"]), train["y"])
+
+            pred_low = min(pred_low, pred_price)
+            pred_high = max(pred_high, pred_price)
+
+            actual_price = float(target_row["y"])
+            prev_close = float(prev_row["y"])
+
+            pred_move = pred_price - prev_close
+            actual_move = actual_price - prev_close
+
+            if abs(actual_move) < 1e-9 and abs(pred_move) < 1e-9:
+                verdict = "TRUE"
+            elif pred_move == 0:
+                verdict = "FALSE"
+            elif (pred_move > 0 and actual_move > 0) or (pred_move < 0 and actual_move < 0):
+                verdict = "TRUE"
+            else:
+                verdict = "FALSE"
+
+            abs_error_pct = (abs(actual_price - pred_price) / actual_price * 100) if actual_price else np.nan
+
+            rows.append(
+                {
+                    "Date": target_row["ds"],
+                    "Previous Close ₹": prev_close,
+                    "Predicted ₹": pred_price,
+                    "Lower ₹": pred_low,
+                    "Upper ₹": pred_high,
+                    "Actual ₹": actual_price,
+                    "Predicted Move %": ((pred_price - prev_close) / prev_close * 100) if prev_close else np.nan,
+                    "Actual Move %": ((actual_price - prev_close) / prev_close * 100) if prev_close else np.nan,
+                    "Error %": abs_error_pct,
+                    "Result": verdict,
+                    "Type": "Past Review",
+                }
+            )
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
+
+
+def style_prediction_review(df: pd.DataFrame):
+    if df.empty:
+        return df
+
+    def color_result(val):
+        if str(val).upper() == "TRUE":
+            return "background-color:#dcfce7;color:#166534;font-weight:700;"
+        if str(val).upper() == "FALSE":
+            return "background-color:#fee2e2;color:#991b1b;font-weight:700;"
+        return ""
+
+    return (
+        df.style
+        .map(color_result, subset=["Result"])
+        .format(
+            {
+                "Previous Close ₹": "{:,.2f}",
+                "Predicted ₹": "{:,.2f}",
+                "Lower ₹": "{:,.2f}",
+                "Upper ₹": "{:,.2f}",
+                "Actual ₹": "{:,.2f}",
+                "Predicted Move %": "{:,.2f}%",
+                "Actual Move %": "{:,.2f}%",
+                "Error %": "{:,.2f}%",
+            },
+            na_rep="-",
+        )
+    )
+
 def simple_backtest(data: pd.DataFrame, holdout_days: int = 30) -> dict:
     df = data[["Close"]].reset_index().copy()
     date_col = df.columns[0]
@@ -1161,16 +1299,113 @@ if run_btn:
                         f"Raw model output looked too extreme for this horizon, so the forecast was clipped into a realistic band of ₹ {fmt_num(cap_meta.get('floor_price'))} to ₹ {fmt_num(cap_meta.get('ceiling_price'))}."
                     )
 
+                past_review_df = build_past_prediction_review(data, days)
+
                 fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(x=hist_df["ds"], y=hist_df["y"], mode="lines", name="Historical"))
+                fig2.add_trace(go.Scatter(x=hist_df["ds"], y=hist_df["y"], mode="lines", name="Historical Actual"))
+
+                if not past_review_df.empty:
+                    true_df = past_review_df[past_review_df["Result"] == "TRUE"].copy()
+                    false_df = past_review_df[past_review_df["Result"] == "FALSE"].copy()
+
+                    if not true_df.empty:
+                        fig2.add_trace(
+                            go.Scatter(
+                                x=true_df["Date"],
+                                y=true_df["Actual ₹"],
+                                mode="markers",
+                                name="Past Prediction True",
+                                marker=dict(color="green", size=10, symbol="circle"),
+                                customdata=np.stack(
+                                    [
+                                        true_df["Previous Close ₹"],
+                                        true_df["Predicted ₹"],
+                                        true_df["Actual ₹"],
+                                        true_df["Predicted Move %"],
+                                        true_df["Actual Move %"],
+                                        true_df["Error %"],
+                                    ],
+                                    axis=-1,
+                                ),
+                                hovertemplate=(
+                                    "<b>%{x|%d-%b-%Y}</b><br>"
+                                    "Prev Close: ₹ %{customdata[0]:,.2f}<br>"
+                                    "Predicted: ₹ %{customdata[1]:,.2f}<br>"
+                                    "Actual: ₹ %{customdata[2]:,.2f}<br>"
+                                    "Pred Move: %{customdata[3]:,.2f}%<br>"
+                                    "Actual Move: %{customdata[4]:,.2f}%<br>"
+                                    "Error: %{customdata[5]:,.2f}%<br>"
+                                    "Status: TRUE<extra></extra>"
+                                ),
+                            )
+                        )
+
+                    if not false_df.empty:
+                        fig2.add_trace(
+                            go.Scatter(
+                                x=false_df["Date"],
+                                y=false_df["Actual ₹"],
+                                mode="markers",
+                                name="Past Prediction False",
+                                marker=dict(color="red", size=10, symbol="x"),
+                                customdata=np.stack(
+                                    [
+                                        false_df["Previous Close ₹"],
+                                        false_df["Predicted ₹"],
+                                        false_df["Actual ₹"],
+                                        false_df["Predicted Move %"],
+                                        false_df["Actual Move %"],
+                                        false_df["Error %"],
+                                    ],
+                                    axis=-1,
+                                ),
+                                hovertemplate=(
+                                    "<b>%{x|%d-%b-%Y}</b><br>"
+                                    "Prev Close: ₹ %{customdata[0]:,.2f}<br>"
+                                    "Predicted: ₹ %{customdata[1]:,.2f}<br>"
+                                    "Actual: ₹ %{customdata[2]:,.2f}<br>"
+                                    "Pred Move: %{customdata[3]:,.2f}%<br>"
+                                    "Actual Move: %{customdata[4]:,.2f}%<br>"
+                                    "Error: %{customdata[5]:,.2f}%<br>"
+                                    "Status: FALSE<extra></extra>"
+                                ),
+                            )
+                        )
+
                 fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_upper"], mode="lines", line=dict(width=0), showlegend=False))
                 fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_lower"], mode="lines", fill="tonexty", line=dict(width=0), name="Confidence Range"))
-                fig2.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat"], mode="lines", name="Predicted"))
-                fig2.update_layout(title="Historical + Forecast", xaxis_title="Date", yaxis_title="Price", height=560)
+                fig2.add_trace(go.Scatter(x=future_rows["ds"], y=future_rows["yhat"], mode="lines+markers", name="Future Predicted"))
+                fig2.update_layout(title="Historical + Past Review + Future Forecast", xaxis_title="Date", yaxis_title="Price", height=580)
                 st.plotly_chart(fig2, use_container_width=True)
 
-                prediction_table = future_rows.round(2).rename(columns={"ds": "Date", "yhat": "Predicted ₹", "yhat_lower": "Lower ₹", "yhat_upper": "Upper ₹"})
-                st.dataframe(prediction_table, use_container_width=True)
+                st.markdown("### Past Prediction Review")
+                if not past_review_df.empty:
+                    true_count = int((past_review_df["Result"] == "TRUE").sum())
+                    false_count = int((past_review_df["Result"] == "FALSE").sum())
+                    accuracy_pct = (true_count / len(past_review_df) * 100) if len(past_review_df) else 0
+
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Reviewed Days", len(past_review_df))
+                    r2.metric("True", true_count)
+                    r3.metric("Accuracy", f"{accuracy_pct:.2f}%")
+
+                    st.dataframe(style_prediction_review(past_review_df), use_container_width=True, height=420)
+                else:
+                    st.info("Not enough historical data to build past prediction review for the selected horizon.")
+
+                st.markdown("### Upcoming Forecast")
+                future_prediction_table = future_rows.copy().rename(
+                    columns={"ds": "Date", "yhat": "Predicted ₹", "yhat_lower": "Lower ₹", "yhat_upper": "Upper ₹"}
+                )
+                future_prediction_table["Actual ₹"] = np.nan
+                future_prediction_table["Result"] = "Pending"
+                future_prediction_table["Type"] = "Future Forecast"
+
+                st.dataframe(
+                    future_prediction_table[["Date", "Predicted ₹", "Lower ₹", "Upper ₹", "Actual ₹", "Result", "Type"]].round(2),
+                    use_container_width=True,
+                    height=420,
+                )
 
         with tab4:
             st.subheader("🧪 Backtest Accuracy")
