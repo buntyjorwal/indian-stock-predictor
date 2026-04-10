@@ -1048,23 +1048,26 @@ def style_hybrid_review(df: pd.DataFrame):
     def color_skip(val):
         return "background-color:#e5e7eb;color:#374151;" if str(val) == "Yes" else ""
 
-    return (
-        df.style
-        .map(color_result, subset=["Result"])
-        .map(color_skip, subset=["Skip"])
-        .format({
-            "Previous Close ₹": "{:,.2f}",
-            "Predicted ₹": "{:,.2f}",
-            "Lower ₹": "{:,.2f}",
-            "Upper ₹": "{:,.2f}",
-            "Actual ₹": "{:,.2f}",
-            "Predicted Move %": "{:,.2f}%",
-            "Actual Move %": "{:,.2f}%",
-            "Error %": "{:,.2f}%",
-            "Hybrid Score": "{:,.2f}",
-            "Confidence %": "{:,.0f}%",
-        }, na_rep='-')
-    )
+    styler = df.style
+    if "Result" in df.columns:
+        styler = styler.map(color_result, subset=["Result"])
+    if "Skip" in df.columns:
+        styler = styler.map(color_skip, subset=["Skip"])
+
+    fmt_map = {
+        "Previous Close ₹": "{:,.2f}",
+        "Predicted ₹": "{:,.2f}",
+        "Lower ₹": "{:,.2f}",
+        "Upper ₹": "{:,.2f}",
+        "Actual ₹": "{:,.2f}",
+        "Predicted Move %": "{:,.2f}%",
+        "Actual Move %": "{:,.2f}%",
+        "Error %": "{:,.2f}%",
+        "Hybrid Score": "{:,.2f}",
+        "Confidence %": "{:,.2f}%",
+    }
+    fmt_map = {k: v for k, v in fmt_map.items() if k in df.columns}
+    return styler.format(fmt_map, na_rep="-")
 
 def risk_level(df: pd.DataFrame) -> tuple[str, float]:
     daily_ret = df["Close"].pct_change().dropna()
@@ -2110,7 +2113,7 @@ if run_btn:
 
                     if not detail_df.empty:
                         st.markdown("#### Signal Details")
-                        detail_cols = ["Signal Date", "Target Date", "Horizon", "Predicted ₹", "Actual ₹", "Error %", "Confidence %", "Trend", "Direction", "Direction Match", "Result", "Why"]
+                        detail_cols = ["Signal Date", "Target Date", "Horizon", "Predicted ₹", "Actual ₹", "Error %", "Confidence %", "Trend", "Direction", "Direction Match", "Result", "Skip", "Why"]
                         st.dataframe(style_hybrid_review(detail_df[detail_cols]), use_container_width=True, height=420)
             else:
                 st.info("Backtest is hidden from sidebar settings.")
