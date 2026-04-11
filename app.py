@@ -537,19 +537,14 @@ def render_market_watch_panel(active_symbol: str, watchlist: list[str]) -> None:
         "Energy": ["RELIANCE.NS", "ONGC.NS", "IOC.NS"],
         "Watchlist": rows[:12],
     }
-    html = '<div class="panel-box"><div class="dock-title">Symbols / Explorer Tree</div>'
+    st.markdown("<div class='dock-title'>Symbols / Explorer Tree</div>", unsafe_allow_html=True)
     for title, symbols in groups.items():
-        html += f'<div class="tree-group-title">▾ {title}</div>'
-        for sym in symbols:
-            marker = "🟢" if sym == active_symbol else ("🔵" if sym in rows else "⚪")
-            html += f'''
-                <div class="market-watch-item">
-                    <span>{marker} {sym}</span>
-                    <span class="tree-badge">EQ</span>
-                </div>
-            '''
-    html += '</div>'
-    st.markdown(html, unsafe_allow_html=True)
+        with st.expander(title, expanded=(title in ["Indices", "Watchlist"])):
+            for sym in symbols:
+                marker = "🟢" if sym == active_symbol else ("🔵" if sym in rows else "⚪")
+                left, right = st.columns([5, 1])
+                left.markdown(f"{marker} {sym}")
+                right.markdown("EQ")
 
 
 def render_info_panel(current_price: float, signal: dict, risk_name: str, levels: dict, fundamentals: dict) -> None:
@@ -618,18 +613,12 @@ def render_hero_metrics(current_price: float, day_change: float, day_change_pct:
 
 
 def render_stat_cards(items: list[tuple[str, str, str]]) -> None:
-    cards = []
-    for label, value, sub in items:
-        cards.append(
-            f"""
-            <div class="stat-card">
-                <div class="metric-label">{label}</div>
-                <div class="metric-value">{value}</div>
-                <div class="metric-sub">{sub}</div>
-            </div>
-            """
-        )
-    st.markdown(f"<div class='stat-card-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+    cols = st.columns(len(items))
+    for col, (label, value, sub) in zip(cols, items):
+        with col:
+            st.markdown(f"<div class='dock-title' style='margin-bottom:6px;'>{label}</div>", unsafe_allow_html=True)
+            st.metric(label=label, value=value, help=sub)
+            st.caption(sub)
 
 
 def dataframe_to_html(df: pd.DataFrame, max_rows: int = 10) -> str:
@@ -643,10 +632,8 @@ def dataframe_to_html(df: pd.DataFrame, max_rows: int = 10) -> str:
 
 
 def render_mini_window(title: str, body_html: str) -> None:
-    st.markdown(
-        f"<div class='mini-window'><div class='mini-window-header'><span>{title}</span><span style='color:#93a4bd;'>▢ — ✕</span></div><div class='mini-window-body'>{body_html}</div></div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"<div class='dock-title'>{title}</div>", unsafe_allow_html=True)
+    st.markdown(body_html, unsafe_allow_html=True)
 
 
 def build_scanner_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
@@ -670,9 +657,6 @@ def build_scanner_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
             continue
     return pd.DataFrame(rows)
 
-
-def render_mini_window(title: str, body_html: str) -> None:
-    st.markdown(f"<div class='mini-window'><div class='mini-window-header'><span>{title}</span><span>▢ — ✕</span></div><div class='mini-window-body'>{body_html}</div></div>", unsafe_allow_html=True)
 
 
 def build_symbol_heatmap(symbols: tuple[str, ...]) -> pd.DataFrame:
@@ -2512,9 +2496,17 @@ if run_btn:
 
             mini1, mini2 = st.columns(2, gap="large")
             with mini1:
-                render_mini_window("Relative Strength / Heatmap", dataframe_to_html(heat_df, max_rows=10))
+                st.markdown("<div class='dock-title'>Relative Strength / Heatmap</div>", unsafe_allow_html=True)
+                if heat_df is not None and not heat_df.empty:
+                    st.dataframe(heat_df.head(10), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No heatmap data available.")
             with mini2:
-                render_mini_window("Explorer / Scan Results", dataframe_to_html(scanner_df, max_rows=10))
+                st.markdown("<div class='dock-title'>Explorer / Scan Results</div>", unsafe_allow_html=True)
+                if scanner_df is not None and not scanner_df.empty:
+                    st.dataframe(scanner_df.head(10), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No scan results available.")
 
 
         with tab2:
