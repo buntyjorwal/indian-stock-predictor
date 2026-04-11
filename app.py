@@ -427,6 +427,7 @@ def inject_css() -> None:
             .stTabs [data-baseweb="tab-list"] {
                 gap: 8px;
                 padding: 0;
+                margin-top:10px;
                 margin-bottom: 12px;
                 overflow-x: auto;
             }
@@ -475,7 +476,7 @@ def top_banner() -> None:
     st.markdown(
         """
         <div class="app-card">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap; margin-top:30px;">
                 <div style="max-width:860px;">
                     <div class="dock-title" style="margin-bottom:12px;">Professional Trading Workspace</div>
                     <h1 class="hero-title">AmiBroker-Style AI Market Workstation</h1>
