@@ -168,9 +168,13 @@ def render_terminal_toolbar(symbol: str, compare_count: int, source_label: str) 
         f"""
         <div class="terminal-toolbar">
             <div class="toolbar-left">
-                <span>File</span><span>View</span><span>Insert</span><span>Symbols</span><span>Analysis</span><span>Tools</span><span>Window</span><span>Help</span>
+                <span>File</span><span>Edit</span><span>View</span><span>Insert</span><span>Symbols</span><span>Analysis</span><span>Tools</span><span>Window</span><span>Help</span>
             </div>
             <div>
+                <span class="tool-btn">Scan</span>
+                <span class="tool-btn">Explore</span>
+                <span class="tool-btn">Backtest</span>
+                <span class="tool-btn">Optimize</span>
                 <span class="terminal-chip">Symbol: {symbol}</span>
                 <span class="terminal-chip">Compare: {compare_count}</span>
                 <span class="terminal-chip">Source: {source_label}</span>
@@ -182,12 +186,22 @@ def render_terminal_toolbar(symbol: str, compare_count: int, source_label: str) 
 
 
 def render_market_watch_panel(active_symbol: str, watchlist: list[str]) -> None:
-    rows = watchlist or [active_symbol]
-    items = []
-    for sym in rows[:12]:
-        marker = "🟢" if sym == active_symbol else "⚪"
-        items.append(f'<div class="market-watch-item"><span>{marker} {sym}</span><span>EQ</span></div>')
-    st.markdown('<div class="panel-box"><div class="dock-title">Symbols / Market Watch</div>' + ''.join(items) + '</div>', unsafe_allow_html=True)
+    rows = list(dict.fromkeys((watchlist or []) + [active_symbol]))
+    groups = {
+        "Indices": ["^NSEI", "^NSEBANK"],
+        "Banking": ["HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "AXISBANK.NS"],
+        "Technology": ["TCS.NS", "INFY.NS", "WIPRO.NS"],
+        "Energy": ["RELIANCE.NS", "ONGC.NS", "IOC.NS"],
+        "Watchlist": rows[:12],
+    }
+    html = '<div class="panel-box"><div class="dock-title">Symbols / Explorer Tree</div>'
+    for title, symbols in groups.items():
+        html += f'<div class="tree-group-title">▾ {title}</div>'
+        for sym in symbols:
+            marker = "🟢" if sym == active_symbol else ("🔵" if sym in rows else "⚪")
+            html += f'<div class="market-watch-item"><span>{marker} {sym}</span><span>EQ</span></div>'
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def render_info_panel(current_price: float, signal: dict, risk_name: str, levels: dict, fundamentals: dict) -> None:
@@ -203,6 +217,48 @@ def render_info_panel(current_price: float, signal: dict, risk_name: str, levels
     ]
     html = '<div class="panel-box"><div class="dock-title">Information</div>' + ''.join([f'<div class="info-kv"><span>{k}</span><strong>{v}</strong></div>' for k, v in pairs]) + '</div>'
     st.markdown(html, unsafe_allow_html=True)
+
+
+def build_scanner_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
+    rows = []
+    for sym in symbols:
+        try:
+            df, _, _ = fetch_stock_data(sym)
+            if df is None or len(df) < 25:
+                continue
+            df = add_indicators(df)
+            last = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) > 1 else last
+            close = float(last["Close"])
+            chg_pct = ((close - float(prev["Close"])) / float(prev["Close"]) * 100) if float(prev["Close"]) else 0.0
+            sma20 = float(last["SMA20"]) if pd.notna(last.get("SMA20")) else np.nan
+            rsi = float(last["RSI14"]) if pd.notna(last.get("RSI14")) else np.nan
+            trend = "Bullish" if pd.notna(sma20) and close > sma20 else ("Bearish" if pd.notna(sma20) and close < sma20 else "Sideways")
+            signal = "Breakout" if chg_pct > 1.5 and trend == "Bullish" else ("Weak" if abs(chg_pct) < 0.5 else trend)
+            rows.append({"Ticker": sym, "Last": round(close,2), "%Chg": round(chg_pct,2), "RSI": round(rsi,2) if pd.notna(rsi) else np.nan, "Trend": trend, "Signal": signal})
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+
+def render_mini_window(title: str, body_html: str) -> None:
+    st.markdown(f"<div class='mini-window'><div class='mini-window-header'><span>{title}</span><span>▢ — ✕</span></div><div class='mini-window-body'>{body_html}</div></div>", unsafe_allow_html=True)
+
+
+def build_symbol_heatmap(symbols: tuple[str, ...]) -> pd.DataFrame:
+    rows = []
+    for sym in symbols:
+        try:
+            df, _, _ = fetch_stock_data(sym)
+            if df is None or len(df) < 6:
+                continue
+            close = float(df["Close"].iloc[-1])
+            ret_5 = ((close / float(df["Close"].iloc[-6])) - 1) * 100 if len(df) >= 6 else np.nan
+            vol = float(df["Close"].pct_change().dropna().tail(20).std() * np.sqrt(252) * 100) if len(df) > 20 else np.nan
+            rows.append({"Ticker": sym, "5D %": round(ret_5,2), "Volatility %": round(vol,2) if pd.notna(vol) else np.nan})
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
 
 
 def build_corr_matrix(symbols: tuple[str, ...]) -> pd.DataFrame:
@@ -1938,13 +1994,18 @@ if run_btn:
 
         with tab1:
             left_col, center_col, right_col = st.columns([1.15, 3.7, 1.35])
+            market_watch_universe = tuple(dict.fromkeys(compare_symbols + st.session_state.watchlist + [symbol, "SBIN.NS", "ICICIBANK.NS", "TCS.NS", "INFY.NS", "RELIANCE.NS"]))
+            scanner_df = build_scanner_snapshot(market_watch_universe)
             with left_col:
                 render_market_watch_panel(symbol, st.session_state.watchlist)
                 st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
                 wl_df = build_watchlist_snapshot(tuple(st.session_state.watchlist)) if st.session_state.watchlist else pd.DataFrame()
                 if not wl_df.empty:
                     st.markdown("<div class='dock-title'>Quick Market Watch</div>", unsafe_allow_html=True)
-                    st.dataframe(wl_df.head(8), use_container_width=True, height=320)
+                    st.dataframe(wl_df.head(8), use_container_width=True, height=260)
+                if not scanner_df.empty:
+                    st.markdown("<div class='dock-title'>Explorer Scan</div>", unsafe_allow_html=True)
+                    st.dataframe(scanner_df.head(10), use_container_width=True, height=260)
             with center_col:
                 st.subheader(f"📉 {symbol} Main Chart Workspace")
                 fig = go.Figure()
@@ -1973,6 +2034,21 @@ if run_btn:
             sr2.metric("Nearest Resistance", f"₹ {fmt_num(levels['resistance'])}" if levels["resistance"] is not None else "-")
             sr3.metric("Suggested Stop Loss", f"₹ {fmt_num(levels['stop_loss'])}" if levels["stop_loss"] is not None else "-")
             sr4.metric("Breakout Zone", f"₹ {fmt_num(levels['breakout'])}" if levels["breakout"] is not None else "-")
+
+            mini1, mini2 = st.columns(2)
+            with mini1:
+                heat_df = build_symbol_heatmap(market_watch_universe)
+                if not heat_df.empty:
+                    body = heat_df.head(8).to_html(index=False)
+                else:
+                    body = "<div style='color:#cbd5e1;'>No heatmap data available.</div>"
+                render_mini_window("Relative Strength / Heatmap", body)
+            with mini2:
+                if not scanner_df.empty:
+                    body = scanner_df.head(8).to_html(index=False)
+                else:
+                    body = "<div style='color:#cbd5e1;'>No scan results available.</div>"
+                render_mini_window("Explorer / Scan Results", body)
 
         with tab2:
             if not show_technical:
@@ -2287,7 +2363,15 @@ if run_btn:
                     st.dataframe(wl_df, use_container_width=True)
 
         with tab8:
-            st.subheader("⚖️ Comparison Dashboard")
+            st.subheader("⚖️ Analysis Explorer")
+            scan_universe = tuple(dict.fromkeys(compare_symbols + st.session_state.watchlist + [symbol, "SBIN.NS", "ICICIBANK.NS", "TCS.NS", "INFY.NS", "RELIANCE.NS"]))
+            scan_df = build_scanner_snapshot(scan_universe)
+            if not scan_df.empty:
+                sx1, sx2, sx3 = st.columns(3)
+                sx1.metric("Bullish Setups", int((scan_df["Trend"] == "Bullish").sum()))
+                sx2.metric("Breakout Signals", int((scan_df["Signal"] == "Breakout").sum()))
+                sx3.metric("Avg RSI", f"{scan_df['RSI'].dropna().mean():.2f}" if scan_df['RSI'].dropna().size else "-")
+                st.dataframe(scan_df, use_container_width=True, height=240)
             if len(compare_symbols) < 2:
                 st.info("Add at least 2 stocks in comparison mode.")
             else:
