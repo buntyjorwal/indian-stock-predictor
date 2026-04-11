@@ -69,9 +69,33 @@ def inject_css() -> None:
                     linear-gradient(180deg, #030814 0%, #06101f 45%, #040b16 100%);
                 color: var(--text-main);
             }
+            /* Space between AI Insight card and tab buttons */
+div[data-testid="stTabs"] {
+    margin-top: 18px !important;
+}
+
+/* Extra safety: if custom tab pills wrapper is used */
+.tabs-wrapper,
+.custom-tabs,
+.terminal-tabs,
+.nav-tabs-row {
+    margin-top: 18px !important;
+}
+
+/* Optional: AI Insight box bottom spacing */
+.ai-box,
+.ai-insight-box,
+.insight-card {
+    margin-bottom: 8px !important;
+}.tabs-row{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
+    margin-top:20px !important;
+}
 
             .block-container {
-                max-width: 1500px;
+                max-width: 1800px;
                 padding-top: 0.65rem;
                 padding-bottom: 1.75rem;
             }
