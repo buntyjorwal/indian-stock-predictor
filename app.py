@@ -72,7 +72,6 @@ def inject_css() -> None:
 
             .block-container {
                 max-width: 1800px;
-                padding-top: 0.65rem;
                 padding-bottom: 1.75rem;
             }
 
