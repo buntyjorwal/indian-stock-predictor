@@ -489,7 +489,10 @@ def top_banner() -> None:
                 <div style="max-width:860px;">
                     <div class="dock-title" style="margin-bottom:12px;">Professional Trading Workspace</div>
                     <h1 class="hero-title">AI Market Workstation</h1>
-                  
+                    <div class="hero-subtitle">
+                        Cleaner terminal layout, stronger visual hierarchy, safer native Streamlit rendering,
+                        better chart presentation, and a more polished scan, watchlist, and support-resistance experience.
+                    </div>
                 </div>
                 <div style="display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;">
                     <span class="terminal-chip">Market Watch</span>
