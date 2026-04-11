@@ -69,33 +69,9 @@ def inject_css() -> None:
                     linear-gradient(180deg, #030814 0%, #06101f 45%, #040b16 100%);
                 color: var(--text-main);
             }
-            /* Space between AI Insight card and tab buttons */
-div[data-testid="stTabs"] {
-    margin-top: 18px !important;
-}
-
-/* Extra safety: if custom tab pills wrapper is used */
-.tabs-wrapper,
-.custom-tabs,
-.terminal-tabs,
-.nav-tabs-row {
-    margin-top: 18px !important;
-}
-
-/* Optional: AI Insight box bottom spacing */
-.ai-box,
-.ai-insight-box,
-.insight-card {
-    margin-bottom: 8px !important;
-}.tabs-row{
-    display:flex;
-    flex-wrap:wrap;
-    gap:10px;
-    margin-top:20px !important;
-}
 
             .block-container {
-                max-width: 1800px;
+                max-width: 1500px;
                 padding-top: 0.65rem;
                 padding-bottom: 1.75rem;
             }
@@ -404,7 +380,17 @@ div[data-testid="stTabs"] {
                 border: 1px solid #bfdbfe;
                 padding: 16px;
                 border-radius: 16px;
+                margin-bottom: 16px;
                 box-shadow: 0 12px 26px rgba(2, 6, 23, 0.10);
+            }
+
+            div[data-testid="stTabs"] {
+                margin-top: 10px !important;
+            }
+
+            div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+                gap: 10px;
+                padding-top: 6px;
             }
 
             .disclaimer-box {
@@ -502,11 +488,8 @@ def top_banner() -> None:
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap;">
                 <div style="max-width:860px;">
                     <div class="dock-title" style="margin-bottom:12px;">Professional Trading Workspace</div>
-                    <h1 class="hero-title">AmiBroker-Style AI Market Workstation</h1>
-                    <div class="hero-subtitle">
-                        Cleaner terminal layout, stronger visual hierarchy, safer native Streamlit rendering,
-                        better chart presentation, and a more polished scan, watchlist, and support-resistance experience.
-                    </div>
+                    <h1 class="hero-title">AI Market Workstation</h1>
+                  
                 </div>
                 <div style="display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;">
                     <span class="terminal-chip">Market Watch</span>
