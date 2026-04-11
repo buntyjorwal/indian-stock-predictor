@@ -427,7 +427,6 @@ def inject_css() -> None:
             .stTabs [data-baseweb="tab-list"] {
                 gap: 8px;
                 padding: 0;
-                margin-top:10px;
                 margin-bottom: 12px;
                 overflow-x: auto;
             }
@@ -476,13 +475,13 @@ def top_banner() -> None:
     st.markdown(
         """
         <div class="app-card">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap; margin-top:30px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap;">
                 <div style="max-width:860px;">
                     <div class="dock-title" style="margin-bottom:12px;">Professional Trading Workspace</div>
                     <h1 class="hero-title">AmiBroker-Style AI Market Workstation</h1>
                     <div class="hero-subtitle">
-                        Cleaner terminal layout, stronger visual hierarchy, improved information cards,
-                        better chart presentation, and a more polished scan / watchlist / support-resistance experience.
+                        Cleaner terminal layout, stronger visual hierarchy, safer native Streamlit rendering,
+                        better chart presentation, and a more polished scan, watchlist, and support-resistance experience.
                     </div>
                 </div>
                 <div style="display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;">
@@ -617,9 +616,23 @@ def render_stat_cards(items: list[tuple[str, str, str]]) -> None:
     cols = st.columns(len(items))
     for col, (label, value, sub) in zip(cols, items):
         with col:
-            st.markdown(f"<div class='dock-title' style='margin-bottom:6px;'>{label}</div>", unsafe_allow_html=True)
-            st.metric(label=label, value=value, help=sub)
-            st.caption(sub)
+            with st.container(border=True):
+                st.caption(label.upper())
+                st.markdown(f"### {value}")
+                st.caption(sub)
+
+
+def render_table_card(title: str, df: pd.DataFrame, max_rows: int = 10) -> None:
+    st.markdown(f"<div class='dock-title'>{title}</div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        if df is None or df.empty:
+            st.info('No data available.')
+            return
+        show_df = df.head(max_rows).copy()
+        for col in show_df.columns:
+            if pd.api.types.is_float_dtype(show_df[col]):
+                show_df[col] = show_df[col].map(lambda x: round(float(x), 2) if pd.notna(x) else x)
+        st.dataframe(show_df, use_container_width=True, hide_index=True, height=min(420, 42 * (len(show_df) + 1)))
 
 
 def dataframe_to_html(df: pd.DataFrame, max_rows: int = 10) -> str:
@@ -2419,10 +2432,8 @@ if run_btn:
 
             with left_col:
                 render_market_watch_panel(symbol, st.session_state.watchlist)
-                if not wl_df.empty:
-                    render_mini_window("Quick Market Watch", dataframe_to_html(wl_df, max_rows=8))
-                if not scanner_df.empty:
-                    render_mini_window("Explorer Scan", dataframe_to_html(scanner_df, max_rows=10))
+                render_table_card('Quick Market Watch', wl_df, max_rows=8)
+                render_table_card('Explorer Scan', scanner_df, max_rows=10)
 
             with center_col:
                 st.markdown("<div class='section-card'>", unsafe_allow_html=True)
@@ -2497,17 +2508,9 @@ if run_btn:
 
             mini1, mini2 = st.columns(2, gap="large")
             with mini1:
-                st.markdown("<div class='dock-title'>Relative Strength / Heatmap</div>", unsafe_allow_html=True)
-                if heat_df is not None and not heat_df.empty:
-                    st.dataframe(heat_df.head(10), use_container_width=True, hide_index=True)
-                else:
-                    st.info("No heatmap data available.")
+                render_table_card('Relative Strength / Heatmap', heat_df, max_rows=10)
             with mini2:
-                st.markdown("<div class='dock-title'>Explorer / Scan Results</div>", unsafe_allow_html=True)
-                if scanner_df is not None and not scanner_df.empty:
-                    st.dataframe(scanner_df.head(10), use_container_width=True, hide_index=True)
-                else:
-                    st.info("No scan results available.")
+                render_table_card('Explorer / Scan Results', scanner_df, max_rows=10)
 
 
         with tab2:
