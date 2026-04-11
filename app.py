@@ -51,87 +51,419 @@ def inject_css() -> None:
     st.markdown(
         """
         <style>
-            .block-container {padding-top: 0.9rem; padding-bottom: 1.2rem; max-width: 98rem;}
-            .stApp {background: radial-gradient(circle at top, #0b1220 0%, #060b16 55%, #03060c 100%);}
+            :root {
+                --bg-main: #06101f;
+                --bg-soft: #0b1729;
+                --bg-card: linear-gradient(180deg, rgba(13,24,43,0.96) 0%, rgba(8,15,28,0.98) 100%);
+                --line: rgba(148,163,184,0.16);
+                --line-strong: rgba(96,165,250,0.28);
+                --text-main: #f8fafc;
+                --text-soft: #cbd5e1;
+                --text-dim: #93a4bd;
+            }
+
+            .stApp {
+                background:
+                    radial-gradient(circle at top left, rgba(37, 99, 235, 0.18), transparent 30%),
+                    radial-gradient(circle at top right, rgba(14, 165, 233, 0.12), transparent 28%),
+                    linear-gradient(180deg, #030814 0%, #06101f 45%, #040b16 100%);
+                color: var(--text-main);
+            }
+
+            .block-container {
+                max-width: 1500px;
+                padding-top: 0.65rem;
+                padding-bottom: 1.75rem;
+            }
+
+            section[data-testid="stSidebar"] {
+                background: linear-gradient(180deg, #06101f 0%, #081324 100%);
+                border-right: 1px solid rgba(96, 165, 250, 0.10);
+            }
+
+            section[data-testid="stSidebar"] > div {
+                padding-top: 0.8rem;
+            }
+
+            .app-card, .panel-box, .mini-window, .hero-metric, .stat-card, .section-card, .info-card, .reason-card {
+                background: var(--bg-card);
+                border: 1px solid var(--line);
+                box-shadow: 0 18px 40px rgba(0,0,0,0.26);
+            }
+
             .app-card {
-                background: linear-gradient(180deg, #0f1726 0%, #0b1220 100%);
-                padding: 16px 18px;
-                border-radius: 12px;
-                border: 1px solid rgba(148,163,184,0.18);
-                box-shadow: 0 10px 24px rgba(0,0,0,0.22);
-                margin-bottom: 12px;
+                padding: 18px 22px;
+                border-radius: 20px;
+                margin-bottom: 14px;
+                position: relative;
+                overflow: hidden;
             }
-            .app-card h3, .app-card p { margin: 0; }
+
+            .app-card::before {
+                content: "";
+                position: absolute;
+                inset: 0 0 auto 0;
+                height: 3px;
+                background: linear-gradient(90deg, #38bdf8, #60a5fa, #22c55e);
+            }
+
+            .hero-title {
+                font-size: 2rem;
+                font-weight: 800;
+                line-height: 1.1;
+                color: var(--text-main);
+                margin: 0;
+            }
+
+            .hero-subtitle {
+                color: var(--text-soft);
+                margin-top: 8px;
+                font-size: 0.98rem;
+            }
+
             .terminal-toolbar {
-                background: linear-gradient(180deg, #d7dce5 0%, #bcc5d1 100%);
-                padding: 8px 12px;
-                border-radius: 10px;
-                border: 1px solid #94a3b8;
-                color: #0f172a;
-                margin-bottom: 10px;
-                font-size: 13px;
-                display:flex;
-                align-items:center;
-                justify-content:space-between;
-                gap:12px;
+                background: linear-gradient(180deg, rgba(15,23,42,0.92) 0%, rgba(9,16,31,0.98) 100%);
+                padding: 12px 14px;
+                border-radius: 16px;
+                border: 1px solid var(--line-strong);
+                margin-bottom: 14px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                color: var(--text-main);
+                flex-wrap: wrap;
             }
-            .toolbar-left span {margin-right: 14px; font-weight: 600;}
+
             .terminal-chip {
-                display:inline-block;
-                padding: 4px 10px;
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 6px 12px;
                 border-radius: 999px;
-                background: #e2e8f0;
-                border: 1px solid #94a3b8;
-                color: #0f172a;
+                border: 1px solid rgba(148,163,184,0.18);
+                background: rgba(15,23,42,0.95);
+                color: #dbeafe;
                 font-size: 12px;
-                margin-right: 6px;
+                font-weight: 600;
+                margin-right: 8px;
+                margin-bottom: 6px;
             }
+
+            .terminal-chip-soft {
+                background: rgba(10,18,34,0.85);
+                color: var(--text-soft);
+            }
+
             .dock-title {
-                font-size: 12px;
-                letter-spacing: .08em;
+                font-size: 11px;
+                letter-spacing: 0.12em;
                 text-transform: uppercase;
                 color: #93c5fd;
+                margin-bottom: 10px;
+                font-weight: 800;
+            }
+
+            .panel-box {
+                border-radius: 18px;
+                padding: 14px 14px 12px 14px;
+                margin-bottom: 12px;
+            }
+
+            .tree-group-title {
+                font-size: 12px;
+                color: #dbeafe;
+                font-weight: 700;
+                margin: 12px 0 8px 0;
+                padding-top: 4px;
+                border-top: 1px solid rgba(148,163,184,0.10);
+            }
+
+            .tree-group-title:first-of-type {
+                margin-top: 2px;
+                border-top: none;
+            }
+
+            .market-watch-item {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 9px 10px;
+                border-bottom: 1px solid rgba(148,163,184,0.10);
+                border-radius: 10px;
+                font-size: 13px;
+                color: var(--text-soft);
+            }
+
+            .market-watch-item:hover {
+                background: rgba(96,165,250,0.08);
+            }
+
+            .market-watch-item:last-child {
+                border-bottom: none;
+            }
+
+            .tree-badge {
+                min-width: 34px;
+                text-align: center;
+                padding: 2px 8px;
+                border-radius: 999px;
+                font-size: 11px;
+                color: #dbeafe;
+                border: 1px solid rgba(148,163,184,0.12);
+                background: rgba(15,23,42,0.75);
+            }
+
+            .hero-metric-grid, .stat-card-grid {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 12px;
+                margin: 10px 0 14px 0;
+            }
+
+            .hero-metric, .stat-card {
+                border-radius: 18px;
+                padding: 14px 16px;
+                min-height: 108px;
+                position: relative;
+                overflow: hidden;
+            }
+
+            .hero-metric::after, .stat-card::after {
+                content: "";
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 2px;
+                background: linear-gradient(90deg, rgba(56,189,248,0.85), rgba(34,197,94,0.85));
+            }
+
+            .metric-label {
+                color: var(--text-dim);
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                margin-bottom: 10px;
+            }
+
+            .metric-value {
+                color: var(--text-main);
+                font-size: 1.85rem;
+                font-weight: 800;
+                line-height: 1.1;
+            }
+
+            .metric-sub {
+                color: var(--text-soft);
+                margin-top: 8px;
+                font-size: 0.88rem;
+            }
+
+            .metric-positive {color: #4ade80;}
+            .metric-negative {color: #f87171;}
+            .metric-warning {color: #fbbf24;}
+            .metric-accent {color: #7dd3fc;}
+
+            .info-card, .reason-card, .section-card {
+                border-radius: 18px;
+                padding: 14px 16px;
+                margin-bottom: 12px;
+            }
+
+            .info-kv {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 12px;
+                padding: 10px 0;
+                border-bottom: 1px dashed rgba(148,163,184,0.14);
+                font-size: 13px;
+                color: var(--text-soft);
+            }
+
+            .info-kv strong {
+                color: var(--text-main);
+                font-size: 13px;
+            }
+
+            .info-kv:last-child {border-bottom: none;}
+
+            .signal-pill {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                padding: 8px 12px;
+                border-radius: 999px;
+                font-weight: 800;
+                font-size: 12px;
+                letter-spacing: 0.04em;
+                margin-bottom: 10px;
+                color: white;
+            }
+
+            .signal-buy {background: linear-gradient(90deg, rgba(34,197,94,0.88), rgba(22,163,74,0.92));}
+            .signal-sell {background: linear-gradient(90deg, rgba(239,68,68,0.9), rgba(220,38,38,0.92));}
+            .signal-hold, .signal-watch {background: linear-gradient(90deg, rgba(245,158,11,0.9), rgba(217,119,6,0.92));}
+
+            .reason-list {
+                margin: 10px 0 0 0;
+                padding-left: 16px;
+                color: var(--text-soft);
+            }
+
+            .reason-list li {
                 margin-bottom: 8px;
+                line-height: 1.45;
+            }
+
+            .mini-window {
+                border-radius: 18px;
+                overflow: hidden;
+                margin-top: 8px;
+            }
+
+            .mini-window-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 10px 14px;
+                background: linear-gradient(180deg, rgba(16,24,40,0.95), rgba(8,14,26,0.96));
+                border-bottom: 1px solid rgba(148,163,184,0.12);
+                color: var(--text-main);
+                font-size: 13px;
                 font-weight: 700;
             }
-            .panel-box {
-                background: linear-gradient(180deg, #09111f 0%, #0c1729 100%);
-                border: 1px solid rgba(96,165,250,0.18);
-                border-radius: 12px;
-                padding: 12px 14px;
-                box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+
+            .mini-window-body {
+                padding: 12px;
             }
-            .market-watch-item {
-                display:flex;
-                justify-content:space-between;
-                align-items:center;
-                padding:7px 8px;
-                border-bottom:1px solid rgba(148,163,184,0.12);
-                font-size:13px;
+
+            .custom-table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 13px;
+                color: var(--text-soft);
+                overflow: hidden;
             }
-            .market-watch-item:last-child {border-bottom:none;}
-            .info-kv {
-                display:flex;
-                justify-content:space-between;
-                padding:7px 0;
-                border-bottom:1px dashed rgba(148,163,184,0.16);
-                font-size:13px;
+
+            .custom-table thead th {
+                background: rgba(15,23,42,0.96);
+                color: #dbeafe;
+                padding: 10px 12px;
+                text-align: left;
+                font-size: 12px;
+                letter-spacing: 0.04em;
+                border-bottom: 1px solid rgba(148,163,184,0.16);
             }
-            .info-kv:last-child {border-bottom:none;}
+
+            .custom-table tbody td {
+                padding: 10px 12px;
+                border-bottom: 1px solid rgba(148,163,184,0.08);
+                background: rgba(7,12,24,0.38);
+            }
+
+            .custom-table tbody tr:hover td {
+                background: rgba(96,165,250,0.08);
+            }
+
+            .custom-table-wrap {
+                overflow-x: auto;
+                border-radius: 14px;
+                border: 1px solid rgba(148,163,184,0.10);
+            }
+
             .ai-box {
-                background: linear-gradient(180deg, #eef6ff 0%, #f8fbff 100%);
-                color : #1e293b;
+                background: linear-gradient(180deg, rgba(239,246,255,0.96) 0%, rgba(248,250,252,0.96) 100%);
+                color: #0f172a;
                 border: 1px solid #bfdbfe;
                 padding: 16px;
-                border-radius: 12px;
+                border-radius: 16px;
+                box-shadow: 0 12px 26px rgba(2, 6, 23, 0.10);
             }
+
             .disclaimer-box {
-                border-left: 4px solid #eab308;
-                background: #1f1a05;
+                border-left: 4px solid #f59e0b;
+                background: rgba(66, 32, 6, 0.55);
                 padding: 12px 14px;
-                color : #fde68a;
-                border-radius: 10px;
+                color: #fde68a;
+                border-radius: 12px;
                 margin: 8px 0 14px 0;
+            }
+
+            div[data-testid="stMetric"] {
+                background: var(--bg-card);
+                border: 1px solid var(--line);
+                border-radius: 18px;
+                padding: 10px 14px;
+            }
+
+            div[data-testid="stMetricLabel"] {
+                color: var(--text-dim);
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+            }
+
+            div[data-testid="stMetricValue"] {
+                color: var(--text-main);
+            }
+
+            div.stButton > button {
+                border-radius: 12px;
+                border: 1px solid rgba(96,165,250,0.22);
+                background: linear-gradient(180deg, #10213f 0%, #0b162c 100%);
+                color: #eff6ff;
+                font-weight: 700;
+                min-height: 44px;
+            }
+
+            div.stButton > button[kind="primary"] {
+                background: linear-gradient(90deg, #2563eb, #1d4ed8);
+                border: 1px solid rgba(96,165,250,0.45);
+            }
+
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 8px;
+                padding: 0;
+                margin-bottom: 12px;
+                overflow-x: auto;
+            }
+
+            .stTabs [data-baseweb="tab"] {
+                background: rgba(15,23,42,0.85);
+                border: 1px solid rgba(148,163,184,0.12);
+                color: var(--text-soft);
+                border-radius: 12px;
+                padding: 8px 14px;
+                font-weight: 700;
+            }
+
+            .stTabs [aria-selected="true"] {
+                background: linear-gradient(90deg, rgba(37,99,235,0.95), rgba(14,165,233,0.90));
+                color: white !important;
+                border-color: rgba(96,165,250,0.55) !important;
+            }
+
+            div[data-testid="stDataFrame"] {
+                border: 1px solid rgba(148,163,184,0.12);
+                border-radius: 16px;
+                overflow: hidden;
+                background: rgba(10,15,28,0.55);
+            }
+
+            @media (max-width: 1100px) {
+                .hero-metric-grid, .stat-card-grid {
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }
+            }
+
+            @media (max-width: 640px) {
+                .hero-metric-grid, .stat-card-grid {
+                    grid-template-columns: repeat(1, minmax(0, 1fr));
+                }
+                .hero-title {font-size: 1.45rem;}
             }
         </style>
         """,
@@ -143,18 +475,22 @@ def top_banner() -> None:
     st.markdown(
         """
         <div class="app-card">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap;">
-                <div>
-                    <h2 style="margin:0;color:#f8fafc;">📊 AmiBroker-Style AI Market Workstation</h2>
-                    <p style="margin-top:6px;color:#cbd5e1;">
-                        Terminal layout + chart lab + model explorer + backtest lab + AI ensemble
-                    </p>
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap;">
+                <div style="max-width:860px;">
+                    <div class="dock-title" style="margin-bottom:12px;">Professional Trading Workspace</div>
+                    <h1 class="hero-title">AmiBroker-Style AI Market Workstation</h1>
+                    <div class="hero-subtitle">
+                        Cleaner terminal layout, stronger visual hierarchy, improved information cards,
+                        better chart presentation, and a more polished scan / watchlist / support-resistance experience.
+                    </div>
                 </div>
-                <div>
+                <div style="display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;">
                     <span class="terminal-chip">Market Watch</span>
                     <span class="terminal-chip">Chart Lab</span>
+                    <span class="terminal-chip">Forecast Lab</span>
                     <span class="terminal-chip">Model Explorer</span>
                     <span class="terminal-chip">Backtest Lab</span>
+                    <span class="terminal-chip">Portfolio Terminal</span>
                 </div>
             </div>
         </div>
@@ -167,22 +503,29 @@ def render_terminal_toolbar(symbol: str, compare_count: int, source_label: str) 
     st.markdown(
         f"""
         <div class="terminal-toolbar">
-            <div class="toolbar-left">
-                <span>File</span><span>Edit</span><span>View</span><span>Insert</span><span>Symbols</span><span>Analysis</span><span>Tools</span><span>Window</span><span>Help</span>
-            </div>
             <div>
-                <span class="tool-btn">Scan</span>
-                <span class="tool-btn">Explore</span>
-                <span class="tool-btn">Backtest</span>
-                <span class="tool-btn">Optimize</span>
-                <span class="terminal-chip">Symbol: {symbol}</span>
-                <span class="terminal-chip">Compare: {compare_count}</span>
-                <span class="terminal-chip">Source: {source_label}</span>
+                <span class="terminal-chip">Active Symbol: {symbol}</span>
+                <span class="terminal-chip terminal-chip-soft">Compare Basket: {compare_count}</span>
+                <span class="terminal-chip terminal-chip-soft">Data Source: {source_label}</span>
+            </div>
+            <div style="color:#93a4bd;font-size:12px;font-weight:600;">
+                Pro terminal mode enabled
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _signal_class(signal_label: str) -> str:
+    label = str(signal_label or "").upper()
+    if "BUY" in label:
+        return "signal-buy"
+    if "SELL" in label:
+        return "signal-sell"
+    if "WATCH" in label:
+        return "signal-watch"
+    return "signal-hold"
 
 
 def render_market_watch_panel(active_symbol: str, watchlist: list[str]) -> None:
@@ -199,24 +542,111 @@ def render_market_watch_panel(active_symbol: str, watchlist: list[str]) -> None:
         html += f'<div class="tree-group-title">▾ {title}</div>'
         for sym in symbols:
             marker = "🟢" if sym == active_symbol else ("🔵" if sym in rows else "⚪")
-            html += f'<div class="market-watch-item"><span>{marker} {sym}</span><span>EQ</span></div>'
+            html += f'''
+                <div class="market-watch-item">
+                    <span>{marker} {sym}</span>
+                    <span class="tree-badge">EQ</span>
+                </div>
+            '''
     html += '</div>'
     st.markdown(html, unsafe_allow_html=True)
 
 
 def render_info_panel(current_price: float, signal: dict, risk_name: str, levels: dict, fundamentals: dict) -> None:
+    signal_label = signal.get("label", "-")
+    signal_class = _signal_class(signal_label)
     pairs = [
         ("Current", f"₹ {fmt_num(current_price)}"),
-        ("Signal", signal.get("label", "-")),
+        ("Signal", signal_label),
         ("Confidence", f"{signal.get('confidence', 0)}%"),
         ("Risk", risk_name),
         ("Support", f"₹ {fmt_num(levels.get('support'))}" if levels.get('support') is not None else "-"),
         ("Resistance", f"₹ {fmt_num(levels.get('resistance'))}" if levels.get('resistance') is not None else "-"),
         ("Market Cap", format_large_number(fundamentals.get('marketCap')) if fundamentals else "-"),
-        ("PE", fmt_num(fundamentals.get('trailingPE')) if fundamentals else "-")
+        ("PE", fmt_num(fundamentals.get('trailingPE')) if fundamentals else "-"),
     ]
-    html = '<div class="panel-box"><div class="dock-title">Information</div>' + ''.join([f'<div class="info-kv"><span>{k}</span><strong>{v}</strong></div>' for k, v in pairs]) + '</div>'
+    html = f'<div class="info-card"><div class="dock-title">Information</div><div class="signal-pill {signal_class}">{signal_label}</div>'
+    html += ''.join([f'<div class="info-kv"><span>{k}</span><strong>{v}</strong></div>' for k, v in pairs])
+    html += '</div>'
     st.markdown(html, unsafe_allow_html=True)
+
+
+def render_signal_reason_panel(signal: dict) -> None:
+    reasons = signal.get("reasons", [])[:8]
+    if not reasons:
+        reasons = ["No specific reason text available for the current signal."]
+    reasons_html = ''.join([f'<li>{r}</li>' for r in reasons])
+    st.markdown(
+        f"""
+        <div class="reason-card">
+            <div class="dock-title">Signal Reasons</div>
+            <ul class="reason-list">{reasons_html}</ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_hero_metrics(current_price: float, day_change: float, day_change_pct: float, high_52w: float, low_52w: float, avg_volume: float) -> None:
+    change_class = "metric-positive" if day_change >= 0 else "metric-negative"
+    change_sign = "+" if day_change >= 0 else ""
+    html = f"""
+        <div class="hero-metric-grid">
+            <div class="hero-metric">
+                <div class="metric-label">Current Price</div>
+                <div class="metric-value">₹ {fmt_num(current_price)}</div>
+                <div class="metric-sub">Latest close from selected symbol</div>
+            </div>
+            <div class="hero-metric">
+                <div class="metric-label">Day Change</div>
+                <div class="metric-value {change_class}">{change_sign}{fmt_num(day_change)}</div>
+                <div class="metric-sub {change_class}">{change_sign}{day_change_pct:.2f}% vs previous close</div>
+            </div>
+            <div class="hero-metric">
+                <div class="metric-label">52W Range</div>
+                <div class="metric-value metric-accent">₹ {fmt_num(low_52w)} – ₹ {fmt_num(high_52w)}</div>
+                <div class="metric-sub">Low to high range snapshot</div>
+            </div>
+            <div class="hero-metric">
+                <div class="metric-label">20D Avg Volume</div>
+                <div class="metric-value">{fmt_num(avg_volume)}</div>
+                <div class="metric-sub">Average traded volume</div>
+            </div>
+        </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_stat_cards(items: list[tuple[str, str, str]]) -> None:
+    cards = []
+    for label, value, sub in items:
+        cards.append(
+            f"""
+            <div class="stat-card">
+                <div class="metric-label">{label}</div>
+                <div class="metric-value">{value}</div>
+                <div class="metric-sub">{sub}</div>
+            </div>
+            """
+        )
+    st.markdown(f"<div class='stat-card-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+
+
+def dataframe_to_html(df: pd.DataFrame, max_rows: int = 10) -> str:
+    if df is None or df.empty:
+        return "<div style='color:#cbd5e1;padding:8px 2px;'>No data available.</div>"
+    show_df = df.head(max_rows).copy()
+    for col in show_df.columns:
+        if pd.api.types.is_float_dtype(show_df[col]):
+            show_df[col] = show_df[col].map(lambda x: f"{x:,.2f}" if pd.notna(x) else "")
+    return f"<div class='custom-table-wrap'>{show_df.to_html(index=False, classes='custom-table', border=0)}</div>"
+
+
+def render_mini_window(title: str, body_html: str) -> None:
+    st.markdown(
+        f"<div class='mini-window'><div class='mini-window-header'><span>{title}</span><span style='color:#93a4bd;'>▢ — ✕</span></div><div class='mini-window-body'>{body_html}</div></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def build_scanner_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
@@ -1804,7 +2234,7 @@ def build_portfolio_snapshot(portfolio_rows: list) -> pd.DataFrame:
 inject_css()
 top_banner()
 
-st.sidebar.header("Stock Selection")
+st.sidebar.markdown("### Stock Selection")
 quick_stocks = {
     "RELIANCE": "RELIANCE.NS",
     "HDFCBANK": "HDFCBANK.NS",
@@ -1993,62 +2423,99 @@ if run_btn:
         )
 
         with tab1:
-            left_col, center_col, right_col = st.columns([1.15, 3.7, 1.35])
             market_watch_universe = tuple(dict.fromkeys(compare_symbols + st.session_state.watchlist + [symbol, "SBIN.NS", "ICICIBANK.NS", "TCS.NS", "INFY.NS", "RELIANCE.NS"]))
             scanner_df = build_scanner_snapshot(market_watch_universe)
+            wl_df = build_watchlist_snapshot(tuple(st.session_state.watchlist)) if st.session_state.watchlist else pd.DataFrame()
+            heat_df = build_symbol_heatmap(market_watch_universe)
+
+            render_hero_metrics(current_price, day_change, day_change_pct, high_52w, low_52w, avg_volume)
+
+            left_col, center_col, right_col = st.columns([1.12, 3.95, 1.45], gap="large")
+
             with left_col:
                 render_market_watch_panel(symbol, st.session_state.watchlist)
-                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-                wl_df = build_watchlist_snapshot(tuple(st.session_state.watchlist)) if st.session_state.watchlist else pd.DataFrame()
                 if not wl_df.empty:
-                    st.markdown("<div class='dock-title'>Quick Market Watch</div>", unsafe_allow_html=True)
-                    st.dataframe(wl_df.head(8), use_container_width=True, height=260)
+                    render_mini_window("Quick Market Watch", dataframe_to_html(wl_df, max_rows=8))
                 if not scanner_df.empty:
-                    st.markdown("<div class='dock-title'>Explorer Scan</div>", unsafe_allow_html=True)
-                    st.dataframe(scanner_df.head(10), use_container_width=True, height=260)
+                    render_mini_window("Explorer Scan", dataframe_to_html(scanner_df, max_rows=10))
+
             with center_col:
-                st.subheader(f"📉 {symbol} Main Chart Workspace")
+                st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+                st.markdown(f"<div class='dock-title'>Chart Workspace</div>", unsafe_allow_html=True)
+                st.markdown(f"### 📈 {symbol} Main Chart Workspace")
                 fig = go.Figure()
-                fig.add_trace(go.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"], name="Price"))
+                fig.add_trace(
+                    go.Candlestick(
+                        x=data.index,
+                        open=data["Open"],
+                        high=data["High"],
+                        low=data["Low"],
+                        close=data["Close"],
+                        name="Price"
+                    )
+                )
                 if has_indicator_data:
-                    fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], mode="lines", name="SMA20"))
-                    fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode="lines", name="SMA50"))
-                    fig.add_trace(go.Scatter(x=data.index, y=data["SMA200"], mode="lines", name="SMA200"))
+                    fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], mode="lines", name="SMA20", line=dict(width=2)))
+                    fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode="lines", name="SMA50", line=dict(width=2)))
+                    fig.add_trace(go.Scatter(x=data.index, y=data["SMA200"], mode="lines", name="SMA200", line=dict(width=2.2)))
+
                 if levels["support"] is not None:
-                    fig.add_hline(y=levels["support"], annotation_text=f"Support {levels['support']}", line_dash="dot")
+                    fig.add_hline(
+                        y=levels["support"],
+                        annotation_text=f"Support ₹ {fmt_num(levels['support'])}",
+                        line_dash="dot",
+                        line_width=1.2
+                    )
                 if levels["resistance"] is not None:
-                    fig.add_hline(y=levels["resistance"], annotation_text=f"Resistance {levels['resistance']}", line_dash="dot")
+                    fig.add_hline(
+                        y=levels["resistance"],
+                        annotation_text=f"Resistance ₹ {fmt_num(levels['resistance'])}",
+                        line_dash="dot",
+                        line_width=1.2
+                    )
+
                 title_suffix = "with Moving Averages" if has_indicator_data else "(Limited Data Mode)"
-                fig.update_layout(title=f"{symbol} Historical Price {title_suffix}", xaxis_title="Date", yaxis_title="Price", xaxis_rangeslider_visible=False, height=620)
+                fig.update_layout(
+                    title=f"{symbol} Historical Price {title_suffix}",
+                    height=670,
+                    xaxis_title="Date",
+                    yaxis_title="Price",
+                    xaxis_rangeslider_visible=False,
+                    template="plotly_dark",
+                    plot_bgcolor="rgba(6,16,31,0.82)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(l=18, r=18, t=60, b=20),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
+                )
+                fig.update_xaxes(gridcolor="rgba(148,163,184,0.08)", zerolinecolor="rgba(148,163,184,0.08)")
+                fig.update_yaxes(gridcolor="rgba(148,163,184,0.08)", zerolinecolor="rgba(148,163,184,0.08)")
                 st.plotly_chart(fig, use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
             with right_col:
                 render_info_panel(current_price, signal, risk_name, levels, fundamentals)
-                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-                st.markdown("<div class='panel-box'><div class='dock-title'>Signal Reasons</div></div>", unsafe_allow_html=True)
-                for reason in signal.get("reasons", [])[:8]:
-                    st.caption(f"• {reason}")
+                render_signal_reason_panel(signal)
 
-            st.subheader("🎯 Support / Resistance")
-            sr1, sr2, sr3, sr4 = st.columns(4)
-            sr1.metric("Nearest Support", f"₹ {fmt_num(levels['support'])}" if levels["support"] is not None else "-")
-            sr2.metric("Nearest Resistance", f"₹ {fmt_num(levels['resistance'])}" if levels["resistance"] is not None else "-")
-            sr3.metric("Suggested Stop Loss", f"₹ {fmt_num(levels['stop_loss'])}" if levels["stop_loss"] is not None else "-")
-            sr4.metric("Breakout Zone", f"₹ {fmt_num(levels['breakout'])}" if levels["breakout"] is not None else "-")
+            st.markdown("<div class='dock-title' style='margin-top:8px;'>Support / Resistance Desk</div>", unsafe_allow_html=True)
+            render_stat_cards([
+                ("Nearest Support", f"₹ {fmt_num(levels['support'])}" if levels["support"] is not None else "-", "Closest demand area"),
+                ("Nearest Resistance", f"₹ {fmt_num(levels['resistance'])}" if levels["resistance"] is not None else "-", "Closest supply area"),
+                ("Suggested Stop Loss", f"₹ {fmt_num(levels['stop_loss'])}" if levels["stop_loss"] is not None else "-", "Risk-control reference"),
+                ("Breakout Zone", f"₹ {fmt_num(levels['breakout'])}" if levels["breakout"] is not None else "-", "Potential strength trigger"),
+            ])
 
-            mini1, mini2 = st.columns(2)
+            mini1, mini2 = st.columns(2, gap="large")
             with mini1:
-                heat_df = build_symbol_heatmap(market_watch_universe)
-                if not heat_df.empty:
-                    body = heat_df.head(8).to_html(index=False)
-                else:
-                    body = "<div style='color:#cbd5e1;'>No heatmap data available.</div>"
-                render_mini_window("Relative Strength / Heatmap", body)
+                render_mini_window("Relative Strength / Heatmap", dataframe_to_html(heat_df, max_rows=10))
             with mini2:
-                if not scanner_df.empty:
-                    body = scanner_df.head(8).to_html(index=False)
-                else:
-                    body = "<div style='color:#cbd5e1;'>No scan results available.</div>"
-                render_mini_window("Explorer / Scan Results", body)
+                render_mini_window("Explorer / Scan Results", dataframe_to_html(scanner_df, max_rows=10))
+
 
         with tab2:
             if not show_technical:
