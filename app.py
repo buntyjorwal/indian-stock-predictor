@@ -51,29 +51,87 @@ def inject_css() -> None:
     st.markdown(
         """
         <style>
-            .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
+            .block-container {padding-top: 0.9rem; padding-bottom: 1.2rem; max-width: 98rem;}
+            .stApp {background: radial-gradient(circle at top, #0b1220 0%, #060b16 55%, #03060c 100%);}
             .app-card {
-                background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
-                padding: 18px 20px;
-                border-radius: 18px;
-                border: 1px solid rgba(255,255,255,0.08);
-                margin-bottom: 14px;
+                background: linear-gradient(180deg, #0f1726 0%, #0b1220 100%);
+                padding: 16px 18px;
+                border-radius: 12px;
+                border: 1px solid rgba(148,163,184,0.18);
+                box-shadow: 0 10px 24px rgba(0,0,0,0.22);
+                margin-bottom: 12px;
             }
             .app-card h3, .app-card p { margin: 0; }
+            .terminal-toolbar {
+                background: linear-gradient(180deg, #d7dce5 0%, #bcc5d1 100%);
+                padding: 8px 12px;
+                border-radius: 10px;
+                border: 1px solid #94a3b8;
+                color: #0f172a;
+                margin-bottom: 10px;
+                font-size: 13px;
+                display:flex;
+                align-items:center;
+                justify-content:space-between;
+                gap:12px;
+            }
+            .toolbar-left span {margin-right: 14px; font-weight: 600;}
+            .terminal-chip {
+                display:inline-block;
+                padding: 4px 10px;
+                border-radius: 999px;
+                background: #e2e8f0;
+                border: 1px solid #94a3b8;
+                color: #0f172a;
+                font-size: 12px;
+                margin-right: 6px;
+            }
+            .dock-title {
+                font-size: 12px;
+                letter-spacing: .08em;
+                text-transform: uppercase;
+                color: #93c5fd;
+                margin-bottom: 8px;
+                font-weight: 700;
+            }
+            .panel-box {
+                background: linear-gradient(180deg, #09111f 0%, #0c1729 100%);
+                border: 1px solid rgba(96,165,250,0.18);
+                border-radius: 12px;
+                padding: 12px 14px;
+                box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+            }
+            .market-watch-item {
+                display:flex;
+                justify-content:space-between;
+                align-items:center;
+                padding:7px 8px;
+                border-bottom:1px solid rgba(148,163,184,0.12);
+                font-size:13px;
+            }
+            .market-watch-item:last-child {border-bottom:none;}
+            .info-kv {
+                display:flex;
+                justify-content:space-between;
+                padding:7px 0;
+                border-bottom:1px dashed rgba(148,163,184,0.16);
+                font-size:13px;
+            }
+            .info-kv:last-child {border-bottom:none;}
             .ai-box {
-                background: #f8fafc;
-                color : #333333;
-                border: 1px solid #e2e8f0;
+                background: linear-gradient(180deg, #eef6ff 0%, #f8fbff 100%);
+                color : #1e293b;
+                border: 1px solid #bfdbfe;
                 padding: 16px;
-                border-radius: 16px;
+                border-radius: 12px;
             }
             .disclaimer-box {
-                border-left: 6px solid #f59e0b;
-                background: #fff7ed;
-                padding: 14px 16px;
-                color : #333333;
-                border-radius: 12px;
-                margin: 10px 0 16px 0;
+                border-left: 4px solid #eab308;
+                background: #1f1a05;
+                padding: 12px 14px;
+                color : #fde68a;
+                border-radius: 10px;
+                margin: 8px 0 14px 0;
             }
         </style>
         """,
@@ -85,14 +143,80 @@ def top_banner() -> None:
     st.markdown(
         """
         <div class="app-card">
-            <h2>📊 Indian Stock Market Predictor Ultimate</h2>
-            <p style="margin-top:6px;opacity:0.9;">
-                Forecast + Technical Analysis + Fundamentals + Watchlist + Comparison + News Sentiment + Portfolio Tracker
-            </p>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap;">
+                <div>
+                    <h2 style="margin:0;color:#f8fafc;">📊 AmiBroker-Style AI Market Workstation</h2>
+                    <p style="margin-top:6px;color:#cbd5e1;">
+                        Terminal layout + chart lab + model explorer + backtest lab + AI ensemble
+                    </p>
+                </div>
+                <div>
+                    <span class="terminal-chip">Market Watch</span>
+                    <span class="terminal-chip">Chart Lab</span>
+                    <span class="terminal-chip">Model Explorer</span>
+                    <span class="terminal-chip">Backtest Lab</span>
+                </div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_terminal_toolbar(symbol: str, compare_count: int, source_label: str) -> None:
+    st.markdown(
+        f"""
+        <div class="terminal-toolbar">
+            <div class="toolbar-left">
+                <span>File</span><span>View</span><span>Insert</span><span>Symbols</span><span>Analysis</span><span>Tools</span><span>Window</span><span>Help</span>
+            </div>
+            <div>
+                <span class="terminal-chip">Symbol: {symbol}</span>
+                <span class="terminal-chip">Compare: {compare_count}</span>
+                <span class="terminal-chip">Source: {source_label}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_market_watch_panel(active_symbol: str, watchlist: list[str]) -> None:
+    rows = watchlist or [active_symbol]
+    items = []
+    for sym in rows[:12]:
+        marker = "🟢" if sym == active_symbol else "⚪"
+        items.append(f'<div class="market-watch-item"><span>{marker} {sym}</span><span>EQ</span></div>')
+    st.markdown('<div class="panel-box"><div class="dock-title">Symbols / Market Watch</div>' + ''.join(items) + '</div>', unsafe_allow_html=True)
+
+
+def render_info_panel(current_price: float, signal: dict, risk_name: str, levels: dict, fundamentals: dict) -> None:
+    pairs = [
+        ("Current", f"₹ {fmt_num(current_price)}"),
+        ("Signal", signal.get("label", "-")),
+        ("Confidence", f"{signal.get('confidence', 0)}%"),
+        ("Risk", risk_name),
+        ("Support", f"₹ {fmt_num(levels.get('support'))}" if levels.get('support') is not None else "-"),
+        ("Resistance", f"₹ {fmt_num(levels.get('resistance'))}" if levels.get('resistance') is not None else "-"),
+        ("Market Cap", format_large_number(fundamentals.get('marketCap')) if fundamentals else "-"),
+        ("PE", fmt_num(fundamentals.get('trailingPE')) if fundamentals else "-")
+    ]
+    html = '<div class="panel-box"><div class="dock-title">Information</div>' + ''.join([f'<div class="info-kv"><span>{k}</span><strong>{v}</strong></div>' for k, v in pairs]) + '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def build_corr_matrix(symbols: tuple[str, ...]) -> pd.DataFrame:
+    series = {}
+    for sym in symbols:
+        try:
+            df, _, _ = fetch_stock_data(sym)
+            if not df.empty:
+                series[sym] = df['Close'].pct_change()
+        except Exception:
+            continue
+    if len(series) < 2:
+        return pd.DataFrame()
+    return pd.DataFrame(series).dropna(how='all').corr().round(2)
 
 
 # -----------------------------
@@ -1048,26 +1172,23 @@ def style_hybrid_review(df: pd.DataFrame):
     def color_skip(val):
         return "background-color:#e5e7eb;color:#374151;" if str(val) == "Yes" else ""
 
-    styler = df.style
-    if "Result" in df.columns:
-        styler = styler.map(color_result, subset=["Result"])
-    if "Skip" in df.columns:
-        styler = styler.map(color_skip, subset=["Skip"])
-
-    fmt_map = {
-        "Previous Close ₹": "{:,.2f}",
-        "Predicted ₹": "{:,.2f}",
-        "Lower ₹": "{:,.2f}",
-        "Upper ₹": "{:,.2f}",
-        "Actual ₹": "{:,.2f}",
-        "Predicted Move %": "{:,.2f}%",
-        "Actual Move %": "{:,.2f}%",
-        "Error %": "{:,.2f}%",
-        "Hybrid Score": "{:,.2f}",
-        "Confidence %": "{:,.2f}%",
-    }
-    fmt_map = {k: v for k, v in fmt_map.items() if k in df.columns}
-    return styler.format(fmt_map, na_rep="-")
+    return (
+        df.style
+        .map(color_result, subset=["Result"])
+        .map(color_skip, subset=["Skip"])
+        .format({
+            "Previous Close ₹": "{:,.2f}",
+            "Predicted ₹": "{:,.2f}",
+            "Lower ₹": "{:,.2f}",
+            "Upper ₹": "{:,.2f}",
+            "Actual ₹": "{:,.2f}",
+            "Predicted Move %": "{:,.2f}%",
+            "Actual Move %": "{:,.2f}%",
+            "Error %": "{:,.2f}%",
+            "Hybrid Score": "{:,.2f}",
+            "Confidence %": "{:,.0f}%",
+        }, na_rep='-')
+    )
 
 def risk_level(df: pd.DataFrame) -> tuple[str, float]:
     daily_ret = df["Close"].pct_change().dropna()
@@ -1782,6 +1903,7 @@ if run_btn:
             "none": "unknown source",
         }.get(source_used, source_used)
         st.success(f"Data loaded for {symbol} using {source_label}.")
+        render_terminal_toolbar(symbol, len(compare_symbols), source_label)
         if source_note:
             st.caption(source_note)
         if not has_indicator_data:
@@ -1811,24 +1933,39 @@ if run_btn:
         st.markdown(f"<div class='ai-box'><b>🧠 AI Insight</b><br><br>{ai_summary}</div>", unsafe_allow_html=True)
 
         tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
-            ["Overview", "Technical Analysis", "Forecast", "Ensemble Models", "Backtest", "Fundamentals", "Watchlist", "Comparison", "News Sentiment", "Portfolio"]
+            ["Market Watch", "Chart Lab", "Forecast Lab", "Model Explorer", "Backtest Lab", "Fundamentals", "Watchlists", "Analysis Explorer", "News Feed", "Portfolio Terminal"]
         )
 
         with tab1:
-            st.subheader(f"📉 {symbol} Price Overview")
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"], name="Price"))
-            if has_indicator_data:
-                fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], mode="lines", name="SMA20"))
-                fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode="lines", name="SMA50"))
-                fig.add_trace(go.Scatter(x=data.index, y=data["SMA200"], mode="lines", name="SMA200"))
-            if levels["support"] is not None:
-                fig.add_hline(y=levels["support"], annotation_text=f"Support {levels['support']}", line_dash="dot")
-            if levels["resistance"] is not None:
-                fig.add_hline(y=levels["resistance"], annotation_text=f"Resistance {levels['resistance']}", line_dash="dot")
-            title_suffix = "with Moving Averages" if has_indicator_data else "(Limited Data Mode)"
-            fig.update_layout(title=f"{symbol} Historical Price {title_suffix}", xaxis_title="Date", yaxis_title="Price", xaxis_rangeslider_visible=False, height=650)
-            st.plotly_chart(fig, use_container_width=True)
+            left_col, center_col, right_col = st.columns([1.15, 3.7, 1.35])
+            with left_col:
+                render_market_watch_panel(symbol, st.session_state.watchlist)
+                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+                wl_df = build_watchlist_snapshot(tuple(st.session_state.watchlist)) if st.session_state.watchlist else pd.DataFrame()
+                if not wl_df.empty:
+                    st.markdown("<div class='dock-title'>Quick Market Watch</div>", unsafe_allow_html=True)
+                    st.dataframe(wl_df.head(8), use_container_width=True, height=320)
+            with center_col:
+                st.subheader(f"📉 {symbol} Main Chart Workspace")
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"], name="Price"))
+                if has_indicator_data:
+                    fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], mode="lines", name="SMA20"))
+                    fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode="lines", name="SMA50"))
+                    fig.add_trace(go.Scatter(x=data.index, y=data["SMA200"], mode="lines", name="SMA200"))
+                if levels["support"] is not None:
+                    fig.add_hline(y=levels["support"], annotation_text=f"Support {levels['support']}", line_dash="dot")
+                if levels["resistance"] is not None:
+                    fig.add_hline(y=levels["resistance"], annotation_text=f"Resistance {levels['resistance']}", line_dash="dot")
+                title_suffix = "with Moving Averages" if has_indicator_data else "(Limited Data Mode)"
+                fig.update_layout(title=f"{symbol} Historical Price {title_suffix}", xaxis_title="Date", yaxis_title="Price", xaxis_rangeslider_visible=False, height=620)
+                st.plotly_chart(fig, use_container_width=True)
+            with right_col:
+                render_info_panel(current_price, signal, risk_name, levels, fundamentals)
+                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+                st.markdown("<div class='panel-box'><div class='dock-title'>Signal Reasons</div></div>", unsafe_allow_html=True)
+                for reason in signal.get("reasons", [])[:8]:
+                    st.caption(f"• {reason}")
 
             st.subheader("🎯 Support / Resistance")
             sr1, sr2, sr3, sr4 = st.columns(4)
@@ -2172,6 +2309,12 @@ if run_btn:
                         st.info("Ensemble comparison is not available for one or more selected stocks yet.")
                     else:
                         st.dataframe(ensemble_cmp_df, use_container_width=True)
+
+                    corr_df = build_corr_matrix(tuple(compare_symbols))
+                    if not corr_df.empty:
+                        fig_corr = go.Figure(data=go.Heatmap(z=corr_df.values, x=corr_df.columns, y=corr_df.index, text=corr_df.values, texttemplate="%{text}", hovertemplate="%{x} vs %{y}: %{z}<extra></extra>"))
+                        fig_corr.update_layout(title="Correlation Matrix", height=480)
+                        st.plotly_chart(fig_corr, use_container_width=True)
 
         with tab9:
             st.subheader("📰 News Sentiment")
