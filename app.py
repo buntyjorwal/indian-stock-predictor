@@ -884,24 +884,16 @@ def render_live_ticker_bar(df: pd.DataFrame) -> None:
         pct = safe_float(r.get("Change %"))
         color = "#4ade80" if chg >= 0 else "#f87171"
         sign = "+" if chg >= 0 else ""
-        chips.append(
-            f"""
-            <div style="
-                min-width:210px;
-                padding:12px 14px;
-                border-radius:16px;
-                border:1px solid rgba(148,163,184,0.12);
-                background:linear-gradient(180deg, rgba(13,24,43,0.96) 0%, rgba(8,15,28,0.98) 100%);
-                box-shadow:0 10px 24px rgba(0,0,0,0.20);
-            ">
-                <div style="font-size:12px;color:#cbd5e1;font-weight:700;">{r.get('Name')}</div>
-                <div style="font-size:1.55rem;color:#f8fafc;font-weight:800;line-height:1.15;">{fmt_num(r.get('LTP'))}</div>
-                <div style="font-size:0.92rem;color:{color};font-weight:700;">
-                    {sign}{fmt_num(chg)} ({sign}{pct:.2f}%)
-                </div>
-            </div>
-            """
-        )
+
+        chip_html = f"""<div style="min-width:210px;padding:12px 14px;border-radius:16px;border:1px solid rgba(148,163,184,0.12);background:linear-gradient(180deg, rgba(13,24,43,0.96) 0%, rgba(8,15,28,0.98) 100%);box-shadow:0 10px 24px rgba(0,0,0,0.20);">
+<div style="font-size:12px;color:#cbd5e1;font-weight:700;">{r.get('Name')}</div>
+<div style="font-size:1.55rem;color:#f8fafc;font-weight:800;line-height:1.15;">{fmt_num(r.get('LTP'))}</div>
+<div style="font-size:0.92rem;color:{color};font-weight:700;">{sign}{fmt_num(chg)} ({sign}{pct:.2f}%)</div>
+</div>"""
+        chips.append(chip_html)
+
+    wrapper_html = f"""<div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;margin-bottom:10px;">{''.join(chips)}</div>"""
+    st.markdown(wrapper_html, unsafe_allow_html=True)
 
     st.markdown(
         f"""
