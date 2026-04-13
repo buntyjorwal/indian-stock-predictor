@@ -43,6 +43,11 @@ if "last_fetch_source" not in st.session_state:
 if "last_fetch_note" not in st.session_state:
     st.session_state.last_fetch_note = ""
 
+if "live_auto_refresh" not in st.session_state:
+    st.session_state.live_auto_refresh = True
+
+if "live_refresh_sec" not in st.session_state:
+    st.session_state.live_refresh_sec = 60
 
 # -----------------------------
 # UI helpers
@@ -711,7 +716,301 @@ def build_corr_matrix(symbols: tuple[str, ...]) -> pd.DataFrame:
         return pd.DataFrame()
     return pd.DataFrame(series).dropna(how='all').corr().round(2)
 
+# -----------------------------
+# Live dashboard helpers
+# -----------------------------
+LIVE_INDEX_SYMBOLS = {
+    "NIFTY 50": "^NSEI",
+    "BANK NIFTY": "^NSEBANK",
+    "SENSEX": "^BSESN",
+}
 
+LIVE_WATCHLIST_FALLBACK = [
+    "RELIANCE.NS", "HDFCBANK.NS", "TCS.NS", "INFY.NS",
+    "ICICIBANK.NS", "SBIN.NS", "ITC.NS", "LT.NS"
+]
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_intraday_data(symbol: str, period: str = "1d", interval: str = "5m") -> pd.DataFrame:
+    try:
+        raw = yf.download(
+            symbol,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+            threads=False,
+        )
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        raw = flatten_columns(raw.copy())
+
+        open_col = find_price_column(raw, "Open")
+        high_col = find_price_column(raw, "High")
+        low_col = find_price_column(raw, "Low")
+        close_col = find_price_column(raw, "Close")
+        volume_col = find_price_column(raw, "Volume")
+
+        if not close_col:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(index=pd.to_datetime(raw.index))
+        if open_col:
+            df["Open"] = pd.to_numeric(raw[open_col], errors="coerce")
+        if high_col:
+            df["High"] = pd.to_numeric(raw[high_col], errors="coerce")
+        if low_col:
+            df["Low"] = pd.to_numeric(raw[low_col], errors="coerce")
+        df["Close"] = pd.to_numeric(raw[close_col], errors="coerce")
+        if volume_col:
+            df["Volume"] = pd.to_numeric(raw[volume_col], errors="coerce")
+        return df.dropna(subset=["Close"]).copy()
+    except Exception:
+        return pd.DataFrame()
+
+
+def safe_float(v, default=0.0):
+    try:
+        if v is None or pd.isna(v):
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def build_live_symbol_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
+    rows = []
+    for sym in symbols:
+        try:
+            intraday = fetch_intraday_data(sym, period="2d", interval="5m")
+            if intraday.empty:
+                daily, _, _ = fetch_stock_data(sym)
+                if daily is None or daily.empty or len(daily) < 2:
+                    continue
+
+                last_close = safe_float(daily["Close"].iloc[-1])
+                prev_close = safe_float(daily["Close"].iloc[-2], last_close)
+                day_change = last_close - prev_close
+                day_change_pct = (day_change / prev_close * 100) if prev_close else 0.0
+
+                rows.append({
+                    "Symbol": sym,
+                    "Name": sym.replace(".NS", "").replace("^", ""),
+                    "LTP": last_close,
+                    "Change": day_change,
+                    "Change %": day_change_pct,
+                    "Open": safe_float(daily["Open"].iloc[-1], np.nan),
+                    "High": safe_float(daily["High"].iloc[-1], np.nan),
+                    "Low": safe_float(daily["Low"].iloc[-1], np.nan),
+                    "Volume": safe_float(daily["Volume"].iloc[-1], np.nan),
+                    "Source": "Daily"
+                })
+                continue
+
+            ltp = safe_float(intraday["Close"].iloc[-1])
+            prev_close = safe_float(intraday["Close"].iloc[0], ltp)
+            opn = safe_float(intraday["Open"].iloc[0], ltp) if "Open" in intraday.columns else ltp
+            high = safe_float(intraday["High"].max(), ltp) if "High" in intraday.columns else ltp
+            low = safe_float(intraday["Low"].min(), ltp) if "Low" in intraday.columns else ltp
+            vol = safe_float(intraday["Volume"].sum(), np.nan) if "Volume" in intraday.columns else np.nan
+
+            chg = ltp - prev_close
+            chg_pct = (chg / prev_close * 100) if prev_close else 0.0
+
+            rows.append({
+                "Symbol": sym,
+                "Name": sym.replace(".NS", "").replace("^", ""),
+                "LTP": ltp,
+                "Change": chg,
+                "Change %": chg_pct,
+                "Open": opn,
+                "High": high,
+                "Low": low,
+                "Volume": vol,
+                "Source": "Intraday"
+            })
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def build_market_breadth_snapshot(symbols: tuple[str, ...]) -> dict:
+    df = build_live_symbol_snapshot(symbols)
+    if df.empty or "Change" not in df.columns:
+        return {
+            "Traded": 0,
+            "Advances": 0,
+            "Declines": 0,
+            "Unchanged": 0,
+            "Top Gainers": pd.DataFrame(),
+            "Top Losers": pd.DataFrame(),
+        }
+
+    advances = int((df["Change"] > 0).sum())
+    declines = int((df["Change"] < 0).sum())
+    unchanged = int((df["Change"] == 0).sum())
+
+    gainers = df.sort_values("Change %", ascending=False).head(8).copy()
+    losers = df.sort_values("Change %", ascending=True).head(8).copy()
+
+    return {
+        "Traded": int(len(df)),
+        "Advances": advances,
+        "Declines": declines,
+        "Unchanged": unchanged,
+        "Top Gainers": gainers[["Name", "LTP", "Change", "Change %"]],
+        "Top Losers": losers[["Name", "LTP", "Change", "Change %"]],
+    }
+
+
+def render_live_ticker_bar(df: pd.DataFrame) -> None:
+    if df is None or df.empty:
+        st.info("Live ticker data is not available right now.")
+        return
+
+    chips = []
+    for _, r in df.iterrows():
+        chg = safe_float(r.get("Change"))
+        pct = safe_float(r.get("Change %"))
+        color = "#4ade80" if chg >= 0 else "#f87171"
+        sign = "+" if chg >= 0 else ""
+        chips.append(
+            f"""
+            <div style="
+                min-width:210px;
+                padding:12px 14px;
+                border-radius:16px;
+                border:1px solid rgba(148,163,184,0.12);
+                background:linear-gradient(180deg, rgba(13,24,43,0.96) 0%, rgba(8,15,28,0.98) 100%);
+                box-shadow:0 10px 24px rgba(0,0,0,0.20);
+            ">
+                <div style="font-size:12px;color:#cbd5e1;font-weight:700;">{r.get('Name')}</div>
+                <div style="font-size:1.55rem;color:#f8fafc;font-weight:800;line-height:1.15;">{fmt_num(r.get('LTP'))}</div>
+                <div style="font-size:0.92rem;color:{color};font-weight:700;">
+                    {sign}{fmt_num(chg)} ({sign}{pct:.2f}%)
+                </div>
+            </div>
+            """
+        )
+
+    st.markdown(
+        f"""
+        <div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;margin-bottom:10px;">
+            {''.join(chips)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_market_stats_cards(breadth: dict) -> None:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Stock Traded", breadth.get("Traded", 0))
+    c2.metric("Advances", breadth.get("Advances", 0))
+    c3.metric("Declines", breadth.get("Declines", 0))
+    c4.metric("Unchanged", breadth.get("Unchanged", 0))
+
+
+def plot_live_intraday_chart(symbol: str, title: str = ""):
+    df = fetch_intraday_data(symbol, period="1d", interval="5m")
+    if df.empty:
+        st.warning(f"Intraday chart not available for {symbol}")
+        return
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["Close"],
+            mode="lines",
+            name=title or symbol,
+            fill="tozeroy"
+        )
+    )
+
+    fig.update_layout(
+        height=360,
+        margin=dict(l=10, r=10, t=35, b=10),
+        title=title or symbol,
+        template="plotly_dark",
+        xaxis_title="Time",
+        yaxis_title="Price",
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_live_dashboard_home(selected_symbol: str) -> None:
+    live_symbols = list(LIVE_INDEX_SYMBOLS.values())
+
+    wl = list(dict.fromkeys((st.session_state.watchlist or []) + LIVE_WATCHLIST_FALLBACK))
+    live_symbols.extend(wl[:10])
+
+    live_df = build_live_symbol_snapshot(tuple(dict.fromkeys(live_symbols)))
+    index_df = live_df[live_df["Symbol"].isin(LIVE_INDEX_SYMBOLS.values())].copy() if not live_df.empty else pd.DataFrame()
+
+    st.markdown("### 📡 Live Market Dashboard")
+    render_live_ticker_bar(index_df if not index_df.empty else live_df.head(6))
+
+    breadth = build_market_breadth_snapshot(tuple(wl[:12]))
+    render_market_stats_cards(breadth)
+
+    left, right = st.columns([2, 1])
+
+    with left:
+        plot_live_intraday_chart("^NSEI", "NIFTY 50 Intraday")
+
+    with right:
+        st.markdown("#### Live Index Snapshot")
+        nifty_row = live_df[live_df["Symbol"] == "^NSEI"]
+        bank_row = live_df[live_df["Symbol"] == "^NSEBANK"]
+        sensex_row = live_df[live_df["Symbol"] == "^BSESN"]
+
+        for label, row_df in [("NIFTY 50", nifty_row), ("BANK NIFTY", bank_row), ("SENSEX", sensex_row)]:
+            with st.container(border=True):
+                if row_df.empty:
+                    st.write(f"**{label}**")
+                    st.caption("Data not available")
+                else:
+                    r = row_df.iloc[0]
+                    st.write(f"**{label}**")
+                    st.metric(
+                        label="LTP",
+                        value=fmt_num(r["LTP"]),
+                        delta=f"{r['Change']:+.2f} ({r['Change %']:+.2f}%)"
+                    )
+                    st.caption(f"Open: {fmt_num(r['Open'])} | High: {fmt_num(r['High'])} | Low: {fmt_num(r['Low'])}")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.markdown("#### 🚀 Top Gainers")
+        tg = breadth.get("Top Gainers", pd.DataFrame())
+        if tg.empty:
+            st.info("Top gainers not available.")
+        else:
+            st.dataframe(tg, use_container_width=True, hide_index=True)
+
+    with g2:
+        st.markdown("#### 🔻 Top Losers")
+        tl = breadth.get("Top Losers", pd.DataFrame())
+        if tl.empty:
+            st.info("Top losers not available.")
+        else:
+            st.dataframe(tl, use_container_width=True, hide_index=True)
+
+    st.markdown("#### ⭐ Live Watchlist")
+    watch_df = live_df[live_df["Symbol"].isin(wl[:8])].copy()
+    if watch_df.empty:
+        st.info("Watchlist live data is not available.")
+    else:
+        show_cols = ["Name", "LTP", "Change", "Change %", "Open", "High", "Low", "Source"]
+        st.dataframe(watch_df[show_cols], use_container_width=True, hide_index=True)
+
+    st.caption(f"Last updated: {pd.Timestamp.now().strftime('%d-%b-%Y %I:%M:%S %p')}")
 # -----------------------------
 # General helpers
 # -----------------------------
@@ -2311,11 +2610,55 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.sidebar.markdown("### Live Dashboard Settings")
+st.session_state.live_auto_refresh = st.sidebar.toggle(
+    "Auto Refresh Live Dashboard",
+    value=st.session_state.live_auto_refresh
+)
+
+st.session_state.live_refresh_sec = st.sidebar.selectbox(
+    "Refresh Interval (sec)",
+    options=[15, 30, 60, 120, 300],
+    index=[15, 30, 60, 120, 300].index(st.session_state.live_refresh_sec if st.session_state.live_refresh_sec in [15, 30, 60, 120, 300] else 60)
+)
+
+# -----------------------------
+# On-load live dashboard
+# -----------------------------
+if st.session_state.live_auto_refresh and AUTO_REFRESH_OK:
+    st_autorefresh(interval=st.session_state.live_refresh_sec * 1000, key="live_dash_refresh")
+
+render_live_dashboard_home(symbol)
+
+st.markdown("#### 📊 Market Overview")
+o1, o2, o3, o4 = st.columns(4)
+
+nifty_live = build_live_symbol_snapshot(("^NSEI",))
+bank_live = build_live_symbol_snapshot(("^NSEBANK",))
+sensex_live = build_live_symbol_snapshot(("^BSESN",))
+sel_live = build_live_symbol_snapshot((symbol,))
+
+def metric_from_df(col, title, df):
+    if df.empty:
+        col.metric(title, "-", "-")
+    else:
+        r = df.iloc[0]
+        col.metric(title, fmt_num(r["LTP"]), f"{r['Change']:+.2f} ({r['Change %']:+.2f}%)")
+
+metric_from_df(o1, "NIFTY 50", nifty_live)
+metric_from_df(o2, "BANK NIFTY", bank_live)
+metric_from_df(o3, "SENSEX", sensex_live)
+metric_from_df(o4, "ACTIVE SYMBOL", sel_live)
 
 # -----------------------------
 # Main
 # -----------------------------
-if run_btn:
+should_run_main_analysis = run_btn or ("auto_first_load_done" not in st.session_state)
+
+if "auto_first_load_done" not in st.session_state:
+    st.session_state.auto_first_load_done = True
+
+if should_run_main_analysis:
     loading_msg = st.empty()
     progress = st.progress(0)
 

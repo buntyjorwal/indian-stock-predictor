@@ -6,3 +6,4 @@ pandas
 numpy
 nselib
 scikit-learn
+pip install streamlit-autorefresh
