@@ -11,6 +11,12 @@ import yfinance as yf
 from prophet import Prophet
 
 try:
+    from streamlit_autorefresh import st_autorefresh
+    AUTO_REFRESH_OK = True
+except Exception:
+    AUTO_REFRESH_OK = False
+
+try:
     from nselib import capital_market
 except Exception:
     capital_market = None
@@ -2626,7 +2632,12 @@ st.session_state.live_refresh_sec = st.sidebar.selectbox(
 # On-load live dashboard
 # -----------------------------
 if st.session_state.live_auto_refresh and AUTO_REFRESH_OK:
-    st_autorefresh(interval=st.session_state.live_refresh_sec * 1000, key="live_dash_refresh")
+    st_autorefresh(
+        interval=int(st.session_state.live_refresh_sec) * 1000,
+        key="live_dash_refresh"
+    )
+elif st.session_state.live_auto_refresh and not AUTO_REFRESH_OK:
+    st.info("Auto refresh package not installed. Install 'streamlit-autorefresh' to enable live auto refresh.")
 
 render_live_dashboard_home(symbol)
 
