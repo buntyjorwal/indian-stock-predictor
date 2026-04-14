@@ -83,6 +83,7 @@ def inject_css() -> None:
 
             .block-container {
                 max-width: 1800px;
+                padding-top: 1.25rem;
                 padding-bottom: 1.75rem;
             }
 
@@ -737,7 +738,7 @@ LIVE_WATCHLIST_FALLBACK = [
 ]
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def fetch_intraday_data(symbol: str, period: str = "1d", interval: str = "5m") -> pd.DataFrame:
     try:
         raw = yf.download(
@@ -785,7 +786,7 @@ def safe_float(v, default=0.0):
         return default
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def build_live_symbol_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
     rows = []
     for sym in symbols:
@@ -843,7 +844,7 @@ def build_live_symbol_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def build_market_breadth_snapshot(symbols: tuple[str, ...]) -> dict:
     df = build_live_symbol_snapshot(symbols)
     if df.empty or "Change" not in df.columns:
@@ -885,19 +886,31 @@ def render_live_ticker_bar(df: pd.DataFrame) -> None:
         color = "#4ade80" if chg >= 0 else "#f87171"
         sign = "+" if chg >= 0 else ""
 
-        chip_html = f"""<div style="min-width:210px;padding:12px 14px;border-radius:16px;border:1px solid rgba(148,163,184,0.12);background:linear-gradient(180deg, rgba(13,24,43,0.96) 0%, rgba(8,15,28,0.98) 100%);box-shadow:0 10px 24px rgba(0,0,0,0.20);">
-<div style="font-size:12px;color:#cbd5e1;font-weight:700;">{r.get('Name')}</div>
-<div style="font-size:1.55rem;color:#f8fafc;font-weight:800;line-height:1.15;">{fmt_num(r.get('LTP'))}</div>
-<div style="font-size:0.92rem;color:{color};font-weight:700;">{sign}{fmt_num(chg)} ({sign}{pct:.2f}%)</div>
-</div>"""
+        chip_html = f"""
+        <div style="
+            min-width:210px;
+            padding:12px 14px;
+            border-radius:16px;
+            border:1px solid rgba(148,163,184,0.12);
+            background:linear-gradient(180deg, rgba(13,24,43,0.96) 0%, rgba(8,15,28,0.98) 100%);
+            box-shadow:0 10px 24px rgba(0,0,0,0.20);
+        ">
+            <div style="font-size:12px;color:#cbd5e1;font-weight:700;">{r.get('Name')}</div>
+            <div style="font-size:1.55rem;color:#f8fafc;font-weight:800;line-height:1.15;">{fmt_num(r.get('LTP'))}</div>
+            <div style="font-size:0.92rem;color:{color};font-weight:700;">{sign}{fmt_num(chg)} ({sign}{pct:.2f}%)</div>
+        </div>
+        """
         chips.append(chip_html)
-
-    wrapper_html = f"""<div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;margin-bottom:10px;">{''.join(chips)}</div>"""
-    st.markdown(wrapper_html, unsafe_allow_html=True)
 
     st.markdown(
         f"""
-        <div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;margin-bottom:10px;">
+        <div style="
+            display:flex;
+            gap:12px;
+            overflow-x:auto;
+            padding-bottom:8px;
+            margin-bottom:14px;
+        ">
             {''.join(chips)}
         </div>
         """,
@@ -946,8 +959,10 @@ def render_live_dashboard_home(selected_symbol: str) -> None:
     live_symbols = list(LIVE_INDEX_SYMBOLS.values())
 
     wl = list(dict.fromkeys((st.session_state.watchlist or []) + LIVE_WATCHLIST_FALLBACK))
-    live_symbols.extend(wl[:10])
+    if selected_symbol and selected_symbol not in wl and not selected_symbol.startswith("^"):
+        wl.insert(0, selected_symbol)
 
+    live_symbols.extend(wl[:10])
     live_df = build_live_symbol_snapshot(tuple(dict.fromkeys(live_symbols)))
     index_df = live_df[live_df["Symbol"].isin(LIVE_INDEX_SYMBOLS.values())].copy() if not live_df.empty else pd.DataFrame()
 
@@ -957,48 +972,45 @@ def render_live_dashboard_home(selected_symbol: str) -> None:
     breadth = build_market_breadth_snapshot(tuple(wl[:12]))
     render_market_stats_cards(breadth)
 
-    left, right = st.columns([2, 1])
+    left, right = st.columns([2.15, 1], gap="large")
 
     with left:
-        plot_live_intraday_chart("^NSEI", "NIFTY 50 Intraday")
+        with st.container(border=True):
+            plot_live_intraday_chart("^NSEI", "NIFTY 50 Intraday")
 
-    with right:
-        st.markdown("#### Live Index Snapshot")
-        nifty_row = live_df[live_df["Symbol"] == "^NSEI"]
-        bank_row = live_df[live_df["Symbol"] == "^NSEBANK"]
-        sensex_row = live_df[live_df["Symbol"] == "^BSESN"]
-
-        for label, row_df in [("NIFTY 50", nifty_row), ("BANK NIFTY", bank_row), ("SENSEX", sensex_row)]:
-            with st.container(border=True):
-                if row_df.empty:
-                    st.write(f"**{label}**")
-                    st.caption("Data not available")
-                else:
-                    r = row_df.iloc[0]
-                    st.write(f"**{label}**")
-                    st.metric(
-                        label="LTP",
-                        value=fmt_num(r["LTP"]),
-                        delta=f"{r['Change']:+.2f} ({r['Change %']:+.2f}%)"
-                    )
-                    st.caption(f"Open: {fmt_num(r['Open'])} | High: {fmt_num(r['High'])} | Low: {fmt_num(r['Low'])}")
-
-    g1, g2 = st.columns(2)
-    with g1:
         st.markdown("#### 🚀 Top Gainers")
         tg = breadth.get("Top Gainers", pd.DataFrame())
         if tg.empty:
             st.info("Top gainers not available.")
         else:
-            st.dataframe(tg, use_container_width=True, hide_index=True)
+            st.dataframe(tg, use_container_width=True, hide_index=True, height=320)
 
-    with g2:
+    with right:
+        st.markdown("#### Live Index Snapshot")
+
+        for label, sym in LIVE_INDEX_SYMBOLS.items():
+            row_df = live_df[live_df["Symbol"] == sym]
+            with st.container(border=True):
+                st.write(f"**{label}**")
+                if row_df.empty:
+                    st.caption("Data not available")
+                else:
+                    r = row_df.iloc[0]
+                    st.metric(
+                        label="LTP",
+                        value=fmt_num(r["LTP"]),
+                        delta=f"{r['Change']:+.2f} ({r['Change %']:+.2f}%)"
+                    )
+                    st.caption(
+                        f"Open: {fmt_num(r['Open'])} | High: {fmt_num(r['High'])} | Low: {fmt_num(r['Low'])}"
+                    )
+
         st.markdown("#### 🔻 Top Losers")
         tl = breadth.get("Top Losers", pd.DataFrame())
         if tl.empty:
             st.info("Top losers not available.")
         else:
-            st.dataframe(tl, use_container_width=True, hide_index=True)
+            st.dataframe(tl, use_container_width=True, hide_index=True, height=320)
 
     st.markdown("#### ⭐ Live Watchlist")
     watch_df = live_df[live_df["Symbol"].isin(wl[:8])].copy()
@@ -1006,9 +1018,13 @@ def render_live_dashboard_home(selected_symbol: str) -> None:
         st.info("Watchlist live data is not available.")
     else:
         show_cols = ["Name", "LTP", "Change", "Change %", "Open", "High", "Low", "Source"]
-        st.dataframe(watch_df[show_cols], use_container_width=True, hide_index=True)
+        st.dataframe(watch_df[show_cols], use_container_width=True, hide_index=True, height=320)
 
-    st.caption(f"Last updated: {pd.Timestamp.now().strftime('%d-%b-%Y %I:%M:%S %p')}")
+    st.caption(
+        f"Last updated: {pd.Timestamp.now().strftime('%d-%b-%Y %I:%M:%S %p')} | "
+        f"Auto refresh: {'ON' if st.session_state.live_auto_refresh else 'OFF'} | "
+        f"Interval: {st.session_state.live_refresh_sec}s"
+    )
 # -----------------------------
 # General helpers
 # -----------------------------
@@ -2623,13 +2639,22 @@ st.session_state.live_refresh_sec = st.sidebar.selectbox(
 # -----------------------------
 # On-load live dashboard
 # -----------------------------
+refresh_counter = 0
 if st.session_state.live_auto_refresh and AUTO_REFRESH_OK:
-    st_autorefresh(
+    refresh_counter = st_autorefresh(
         interval=int(st.session_state.live_refresh_sec) * 1000,
         key="live_dash_refresh"
     )
 elif st.session_state.live_auto_refresh and not AUTO_REFRESH_OK:
     st.info("Auto refresh package not installed. Install 'streamlit-autorefresh' to enable live auto refresh.")
+
+if refresh_counter:
+    try:
+        fetch_intraday_data.clear()
+        build_live_symbol_snapshot.clear()
+        build_market_breadth_snapshot.clear()
+    except Exception:
+        pass
 
 render_live_dashboard_home(symbol)
 
