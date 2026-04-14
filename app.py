@@ -83,7 +83,6 @@ def inject_css() -> None:
 
             .block-container {
                 max-width: 1800px;
-                padding-top: 1.25rem;
                 padding-bottom: 1.75rem;
             }
 
@@ -981,64 +980,57 @@ def plot_live_intraday_chart(symbol: str, title: str = ""):
     )
     st.plotly_chart(fig, use_container_width=True)
 
+left, right = st.columns([2.15, 1], gap="large")
 
-def render_live_dashboard_home(selected_symbol: str) -> None:
-    live_symbols = list(LIVE_INDEX_SYMBOLS.values())
+with left:
+    st.markdown("#### NIFTY 50 Intraday")
+    with st.container(border=True):
+        plot_live_intraday_chart("^NSEI", "")
 
+with right:
+    st.markdown("#### Live Index Snapshot")
 
-    wl = list(dict.fromkeys((st.session_state.watchlist or []) + LIVE_WATCHLIST_FALLBACK))
-    if selected_symbol and selected_symbol not in wl and not selected_symbol.startswith("^"):
-        wl.insert(0, selected_symbol)
+    for label, sym in LIVE_INDEX_SYMBOLS.items():
+        row_df = live_df[live_df["Symbol"] == sym]
 
-    live_symbols.extend(wl[:10])
-    live_df = build_live_symbol_snapshot(tuple(dict.fromkeys(live_symbols)))
-    index_df = live_df[live_df["Symbol"].isin(LIVE_INDEX_SYMBOLS.values())].copy() if not live_df.empty else pd.DataFrame()
-
-    # st.markdown("### 📡 Live Market Dashboard")
-    # render_live_ticker_bar(index_df if not index_df.empty else live_df.head(6))
-
-    breadth = build_market_breadth_snapshot(tuple(wl[:12]))
-    render_market_stats_cards(breadth)
-
-    left, right = st.columns([2.15, 1], gap="large")
-
-    with left:
         with st.container(border=True):
-            plot_live_intraday_chart("^NSEI", "NIFTY 50 Intraday")
+            st.write(f"**{label}**")
 
-        st.markdown("#### 🚀 Top Gainers")
-        tg = breadth.get("Top Gainers", pd.DataFrame())
+            if row_df.empty:
+                st.caption("Data not available")
+            else:
+                r = row_df.iloc[0]
+                st.metric(
+                    label="LTP",
+                    value=fmt_num(r["LTP"]),
+                    delta=f"{r['Change']:+.2f} ({r['Change %']:+.2f}%)"
+                )
+                st.caption(
+                    f"Open: {fmt_num(r['Open'])} | High: {fmt_num(r['High'])} | Low: {fmt_num(r['Low'])}"
+                )
+
+g1, g2 = st.columns([1, 1], gap="large")
+
+with g1:
+    st.markdown("#### 🚀 Top Gainers")
+    tg = breadth.get("Top Gainers", pd.DataFrame())
+    with st.container(border=True):
         if tg.empty:
             st.info("Top gainers not available.")
         else:
-            st.dataframe(tg, use_container_width=True, hide_index=True, height=320)
+            st.dataframe(tg, use_container_width=True, hide_index=True, height=260)
 
-    with right:
-        st.markdown("#### Live Index Snapshot")
-
-        for label, sym in LIVE_INDEX_SYMBOLS.items():
-            row_df = live_df[live_df["Symbol"] == sym]
-            with st.container(border=True):
-                st.write(f"**{label}**")
-                if row_df.empty:
-                    st.caption("Data not available")
-                else:
-                    r = row_df.iloc[0]
-                    st.metric(
-                        label="LTP",
-                        value=fmt_num(r["LTP"]),
-                        delta=f"{r['Change']:+.2f} ({r['Change %']:+.2f}%)"
-                    )
-                    st.caption(
-                        f"Open: {fmt_num(r['Open'])} | High: {fmt_num(r['High'])} | Low: {fmt_num(r['Low'])}"
-                    )
-
-        st.markdown("#### 🔻 Top Losers")
-        tl = breadth.get("Top Losers", pd.DataFrame())
+with g2:
+    st.markdown("#### 🔻 Top Losers")
+    tl = breadth.get("Top Losers", pd.DataFrame())
+    with st.container(border=True):
         if tl.empty:
             st.info("Top losers not available.")
         else:
-            st.dataframe(tl, use_container_width=True, hide_index=True, height=320)
+            st.dataframe(tl, use_container_width=True, hide_index=True, height=260)
+            )
+
+
 
     st.markdown("#### ⭐ Live Watchlist")
     watch_df = live_df[live_df["Symbol"].isin(wl[:8])].copy()
