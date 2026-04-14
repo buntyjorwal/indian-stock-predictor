@@ -847,7 +847,8 @@ def build_live_symbol_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
 @st.cache_data(ttl=15, show_spinner=False)
 def build_market_breadth_snapshot(symbols: tuple[str, ...]) -> dict:
     df = build_live_symbol_snapshot(symbols)
-    if df.empty or "Change" not in df.columns:
+
+    if df.empty or "Change" not in df.columns or "Change %" not in df.columns:
         return {
             "Traded": 0,
             "Advances": 0,
@@ -857,20 +858,46 @@ def build_market_breadth_snapshot(symbols: tuple[str, ...]) -> dict:
             "Top Losers": pd.DataFrame(),
         }
 
+    df = df.copy()
+    df["Change"] = pd.to_numeric(df["Change"], errors="coerce").fillna(0.0)
+    df["Change %"] = pd.to_numeric(df["Change %"], errors="coerce").fillna(0.0)
+
     advances = int((df["Change"] > 0).sum())
     declines = int((df["Change"] < 0).sum())
     unchanged = int((df["Change"] == 0).sum())
 
-    gainers = df.sort_values("Change %", ascending=False).head(8).copy()
-    losers = df.sort_values("Change %", ascending=True).head(8).copy()
+    # Only positive movers in gainers
+    gainers = (
+        df[df["Change"] > 0]
+        .sort_values(["Change %", "Change"], ascending=[False, False])
+        .head(8)
+        .copy()
+    )
+
+    # Only negative movers in losers
+    losers = (
+        df[df["Change"] < 0]
+        .sort_values(["Change %", "Change"], ascending=[True, True])
+        .head(8)
+        .copy()
+    )
+
+    # Fallback in case market has no gainers / no losers
+    if gainers.empty:
+        gainers = df.sort_values(["Change %", "Change"], ascending=[False, False]).head(8).copy()
+
+    if losers.empty:
+        losers = df.sort_values(["Change %", "Change"], ascending=[True, True]).head(8).copy()
+
+    cols = ["Name", "LTP", "Change", "Change %"]
 
     return {
         "Traded": int(len(df)),
         "Advances": advances,
         "Declines": declines,
         "Unchanged": unchanged,
-        "Top Gainers": gainers[["Name", "LTP", "Change", "Change %"]],
-        "Top Losers": losers[["Name", "LTP", "Change", "Change %"]],
+        "Top Gainers": gainers[cols].reset_index(drop=True),
+        "Top Losers": losers[cols].reset_index(drop=True),
     }
 
 
@@ -957,6 +984,7 @@ def plot_live_intraday_chart(symbol: str, title: str = ""):
 
 def render_live_dashboard_home(selected_symbol: str) -> None:
     live_symbols = list(LIVE_INDEX_SYMBOLS.values())
+
 
     wl = list(dict.fromkeys((st.session_state.watchlist or []) + LIVE_WATCHLIST_FALLBACK))
     if selected_symbol and selected_symbol not in wl and not selected_symbol.startswith("^"):
