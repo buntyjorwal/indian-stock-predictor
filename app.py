@@ -994,8 +994,8 @@ def render_live_dashboard_home(selected_symbol: str) -> None:
     live_df = build_live_symbol_snapshot(tuple(dict.fromkeys(live_symbols)))
     index_df = live_df[live_df["Symbol"].isin(LIVE_INDEX_SYMBOLS.values())].copy() if not live_df.empty else pd.DataFrame()
 
-    st.markdown("### 📡 Live Market Dashboard")
-    render_live_ticker_bar(index_df if not index_df.empty else live_df.head(6))
+    # st.markdown("### 📡 Live Market Dashboard")
+    # render_live_ticker_bar(index_df if not index_df.empty else live_df.head(6))
 
     breadth = build_market_breadth_snapshot(tuple(wl[:12]))
     render_market_stats_cards(breadth)
